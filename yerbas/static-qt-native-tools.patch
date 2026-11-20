@@ -1,0 +1,140 @@
+diff --git a/.github/workflows/build.yaml b/.github/workflows/build.yaml
+index 76f20e35477dc4ef3c35545e958df7e1f46e7b22..d51278fd15a1380c25cded4fce9983edd34884fd 100644
+--- a/.github/workflows/build.yaml
++++ b/.github/workflows/build.yaml
+@@ -104,7 +104,7 @@ jobs:
+       - name: Install native Linux Qt build dependencies
+         if: runner.os == 'Linux' && matrix.platform.id != 'win64'
+         run: |
+-          sudo apt-get install -y meson ninja-build bison libfontconfig1-dev libbrotli-dev libssl-dev libx11-dev libx11-xcb-dev \
++          sudo apt-get install -y libfontconfig1-dev libbrotli-dev libssl-dev libx11-dev libx11-xcb-dev \
+             libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-cursor-dev \
+             libxcb-glx0-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-util-dev \
+             libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-shm0-dev \
+diff --git a/depends/Makefile b/depends/Makefile
+index f2c7983162a0e3f00fbaa1e99a77887caacb548f..ca13115402950c059f51d46b40f69e7e0e0f53c9 100644
+--- a/depends/Makefile
++++ b/depends/Makefile
+@@ -119,6 +119,7 @@ qt_packages_ = $(qt_packages) qt qt5compat
+ qt_native_packages = native_qt native_qttools
+ else ifeq ($(build_os)_$(host_os)_$(build_arch),linux_linux_$(host_arch))
+ qt_packages_ = $(qt_packages) xkbcommon qt qt5compat qttools
++qt_native_packages = native_meson native_ninja native_bison
+ else
+ $(error GUI dependencies support native Linux/macOS and Linux to x86_64-w64-mingw32. Use NO_QT=1 for other targets)
+ endif
+diff --git a/depends/packages/native_bison.mk b/depends/packages/native_bison.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad5616e68fcf4ded4ed1354ef49e19f817b32457
+--- /dev/null
++++ b/depends/packages/native_bison.mk
+@@ -0,0 +1,17 @@
++package=native_bison
++$(package)_version=3.8.2
++$(package)_download_path=https://ftp.gnu.org/gnu/bison
++$(package)_file_name=bison-$($(package)_version).tar.xz
++$(package)_sha256_hash=9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2
++
++define $(package)_config_cmds
++  $($(package)_autoconf) --disable-nls
++endef
++
++define $(package)_build_cmds
++  $(MAKE)
++endef
++
++define $(package)_stage_cmds
++  $(MAKE) DESTDIR=$($(package)_staging_dir) install
++endef
+diff --git a/depends/packages/native_meson.mk b/depends/packages/native_meson.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea108faf92eab5306874042d90c71585bed0982b
+--- /dev/null
++++ b/depends/packages/native_meson.mk
+@@ -0,0 +1,11 @@
++package=native_meson
++$(package)_version=1.7.0
++$(package)_download_path=https://github.com/mesonbuild/meson/releases/download/$($(package)_version)
++$(package)_file_name=meson-$($(package)_version).tar.gz
++$(package)_sha256_hash=08efbe84803eed07f863b05092d653a9d348f7038761d900412fddf56deb0284
++
++define $(package)_stage_cmds
++  mkdir -p $($(package)_staging_prefix_dir)/bin $($(package)_staging_prefix_dir)/share/meson && \
++  cp -R meson.py mesonbuild COPYING $($(package)_staging_prefix_dir)/share/meson/ && \
++  ln -s ../share/meson/meson.py $($(package)_staging_prefix_dir)/bin/meson
++endef
+diff --git a/depends/packages/native_ninja.mk b/depends/packages/native_ninja.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb1cc566b8e27dc1d46281281174cdf1bc3adabf
+--- /dev/null
++++ b/depends/packages/native_ninja.mk
+@@ -0,0 +1,15 @@
++package=native_ninja
++$(package)_version=1.12.1
++$(package)_download_path=https://codeload.github.com/ninja-build/ninja/tar.gz/refs/tags
++$(package)_download_file=v$($(package)_version)
++$(package)_file_name=ninja-$($(package)_version).tar.gz
++$(package)_sha256_hash=821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a
++
++define $(package)_build_cmds
++  CXX="$(build_CXX)" python3 configure.py --bootstrap
++endef
++
++define $(package)_stage_cmds
++  mkdir -p $($(package)_staging_prefix_dir)/bin && \
++  cp ninja $($(package)_staging_prefix_dir)/bin/
++endef
+diff --git a/depends/packages/xkbcommon.mk b/depends/packages/xkbcommon.mk
+index ac46eb499f0d1d3a051fbad0fbbf245995c789c2..8f5916bde6aae131728206ab7a1fa1ab23c87e37 100644
+--- a/depends/packages/xkbcommon.mk
++++ b/depends/packages/xkbcommon.mk
+@@ -3,10 +3,11 @@ $(package)_version=1.7.0
+ $(package)_download_path=https://xkbcommon.org/download
+ $(package)_file_name=libxkbcommon-$($(package)_version).tar.xz
+ $(package)_sha256_hash=65782f0a10a4b455af9c6baab7040e2f537520caa2ec2092805cdfd36863b247
++$(package)_dependencies=native_meson native_ninja native_bison
+ 
+ define $(package)_config_cmds
+   env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH CC="$(host_CC)" \
+-    meson setup build --prefix="$(host_prefix)" --libdir=lib --buildtype=release \
++    $(build_prefix)/bin/meson setup build --prefix="$(host_prefix)" --libdir=lib --buildtype=release \
+       --default-library=static -Db_staticpic=true -Denable-x11=true \
+       -Denable-tools=false -Denable-wayland=false -Denable-xkbregistry=false \
+       -Denable-bash-completion=false -Dxkb-config-root=/usr/share/X11/xkb \
+@@ -14,11 +15,11 @@ define $(package)_config_cmds
+ endef
+ 
+ define $(package)_build_cmds
+-  meson compile -C build -j 2
++  $(build_prefix)/bin/meson compile -C build -j 2
+ endef
+ 
+ define $(package)_stage_cmds
+-  DESTDIR=$($(package)_staging_dir) meson install -C build --no-rebuild && \
++  DESTDIR=$($(package)_staging_dir) $(build_prefix)/bin/meson install -C build --no-rebuild && \
+   mkdir -p $($(package)_staging_prefix_dir)/share/licenses/xkbcommon && \
+   cp LICENSE $($(package)_staging_prefix_dir)/share/licenses/xkbcommon/
+ endef
+diff --git a/doc/local-gui-build.md b/doc/local-gui-build.md
+index adb1adade1b5a6955089fc617b117ffb5088542e..4cd7411f7cc28037d693cc32f64a183e84db2e16 100644
+--- a/doc/local-gui-build.md
++++ b/doc/local-gui-build.md
+@@ -31,7 +31,7 @@ and XCB development libraries on Debian 13:
+ ```sh
+ sudo apt-get install build-essential autoconf automake libtool pkg-config \
+   curl ca-certificates perl python3 bsdextrautils xz-utils bzip2 \
+-  meson ninja-build bison libbrotli-dev \
++  libbrotli-dev \
+   libfontconfig1-dev libx11-xcb-dev libxcb1-dev libxcb-cursor-dev \
+   libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-util-dev \
+   libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev \
+@@ -89,7 +89,8 @@ runtime, X11 or XWayland display, fonts and keyboard data. It statically
+ links X11/XCB, xkbcommon, fontconfig and their desktop library dependencies.
+ The builder needs the static archives from its development packages. Depends
+ builds the pinned xkbcommon archives because Debian ships shared xkbcommon in
+-its development packages. The final link probe rejects other shared libraries.
++its development packages. Depends supplies Meson, Ninja and Bison for that
++build. The final link probe rejects other shared libraries.
+ HTTPS features use the system CA certificates.
+ 
+ Mint 22.3 uses the Ubuntu 24.04 base. Static Qt does not lower the system ABI
