@@ -1,0 +1,1184 @@
+diff --git a/.github/workflows/build.yaml b/.github/workflows/build.yaml
+index 1df01b71eb031c5575fd555d5340a44bc63ab63c..76f20e35477dc4ef3c35545e958df7e1f46e7b22 100644
+--- a/.github/workflows/build.yaml
++++ b/.github/workflows/build.yaml
+@@ -19,23 +19,7 @@ env:
+   FALLBACK_DOWNLOAD_PATH: https://bitcoincore.org/depends-sources
+ 
+ jobs:
+-  appimage-runtime:
+-    name: AppImage extraction runtime
+-    runs-on: ubuntu-24.04
+-    timeout-minutes: 30
+-    steps:
+-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+-        with:
+-          persist-credentials: false
+-      - run: bash ci/build-appimage-runtime.sh appimage-runtime
+-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+-        with:
+-          name: appimage-extraction-runtime
+-          path: appimage-runtime/
+-          if-no-files-found: error
+-
+   build:
+-    needs: appimage-runtime
+     name: ${{ matrix.platform.name }} Build
+     runs-on: ${{ matrix.platform.runner }}
+     container: ${{ matrix.platform.container }}
+@@ -105,13 +89,6 @@ jobs:
+         with:
+           persist-credentials: false
+ 
+-      - name: Download AppImage runtime
+-        if: matrix.platform.id == 'debian13'
+-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+-        with:
+-          name: appimage-extraction-runtime
+-          path: appimage-runtime
+-
+       - name: Install Linux build tools
+         if: runner.os == 'Linux'
+         run: |
+@@ -125,22 +102,15 @@ jobs:
+           fi
+ 
+       - name: Install native Linux Qt build dependencies
+-        if: runner.os == 'Linux' && matrix.platform.id != 'win64' && matrix.platform.id != 'ubuntu26'
++        if: runner.os == 'Linux' && matrix.platform.id != 'win64'
+         run: |
+-          sudo apt-get install -y libfontconfig1-dev libssl-dev libx11-dev libx11-xcb-dev \
++          sudo apt-get install -y meson ninja-build bison libfontconfig1-dev libbrotli-dev libssl-dev libx11-dev libx11-xcb-dev \
+             libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-cursor-dev \
+             libxcb-glx0-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-util-dev \
+             libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-shm0-dev \
+             libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev \
+             libxkbcommon-dev libxkbcommon-x11-dev
+ 
+-      - name: Install Ubuntu Qt development tools
+-        if: matrix.platform.id == 'ubuntu26'
+-        run: |
+-          sudo apt-get install -y qt6-base-dev qt6-base-dev-tools qt6-5compat-dev \
+-            qt6-tools-dev-tools qt6-qpa-plugins libgl-dev
+-          pkg-config --atleast-version=6.8 Qt6Core Qt6Core5Compat Qt6Test
+-
+       - name: Install macOS build tools
+         if: runner.os == 'macOS'
+         run: |
+@@ -162,7 +132,7 @@ jobs:
+           path: |
+             depends/sources
+             depends/built
+-          key: depends-${{ matrix.platform.id }}-${{ hashFiles('depends/Makefile', 'depends/**/*.mk', 'depends/patches/**', 'depends/config.site.in') }}
++          key: depends-${{ matrix.platform.id }}-${{ hashFiles('depends/Makefile', 'depends/**/*.mk', 'depends/patches/**', 'depends/config.site.in', 'ci/build-native-qt.py') }}
+           restore-keys: |
+             depends-${{ matrix.platform.id }}-
+ 
+@@ -174,29 +144,26 @@ jobs:
+           if [[ "$RUNNER_OS" == macOS ]]; then
+             extra_args+=(OSX_MIN_VERSION=11.0)
+           fi
+-          if [[ "$PLATFORM_ID" != win64 ]]; then
++          if [[ "$RUNNER_OS" == macOS ]]; then
+             extra_args+=(USE_SYSTEM_QT=1)
+           fi
+           make -C depends -j"$BUILD_JOBS" HOST="$HOST_TRIPLE" NO_UPNP=1 "${extra_args[@]}" \
+             2>&1 | tee ci-logs/depends.log
+ 
+       - name: Cache native desktop Qt
+-        if: matrix.platform.id != 'win64' && matrix.platform.id != 'ubuntu26'
++        if: runner.os == 'macOS'
+         id: native-qt-cache
+         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+         with:
+           path: qt-native
+-          key: native-qt-static-linux-v1-${{ matrix.platform.id }}-${{ hashFiles('ci/build-native-qt.py', 'depends/packages/qt.mk', 'depends/packages/qt5compat.mk', 'depends/packages/native_qttools.mk') }}
++          key: native-qt-macos-v1-${{ matrix.platform.id }}-${{ hashFiles('ci/build-native-qt.py', 'depends/packages/qt.mk', 'depends/packages/qt5compat.mk', 'depends/packages/native_qttools.mk') }}
+ 
+       - name: Build and verify native desktop Qt
+-        if: matrix.platform.id != 'win64' && matrix.platform.id != 'ubuntu26'
++        if: runner.os == 'macOS'
+         run: |
+           set -euo pipefail
+-          # Keep the array nonempty for macOS Bash 3.2 with set -u.
+-          qt_args=(--prefix "$PWD/qt-native")
+-          if [[ "$RUNNER_OS" == Linux ]]; then qt_args+=(--static-linux); fi
+           if [[ ! -f qt-native/.complete ]]; then
+-            python3 ci/build-native-qt.py "${qt_args[@]}" \
++            python3 ci/build-native-qt.py --prefix "$PWD/qt-native" \
+               --cmake "$PWD/depends/$HOST_TRIPLE/native/bin/cmake" --jobs "$BUILD_JOBS" \
+               2>&1 | tee ci-logs/native-qt.log
+           fi
+@@ -293,19 +260,7 @@ jobs:
+               install -m755 "src/${name}${BINARY_EXTENSION}" package/
+             done
+             install -m755 "src/test/test_yerbas${BINARY_EXTENSION}" test-binaries/
+-            if [[ "$PLATFORM_ID" == ubuntu26 ]]; then
+-              # Copy real executables when libtool generated launcher scripts.
+-              for entry in "src/qt/yerbas-qt:package" "src/qt/test/test_yerbas-qt:test-binaries"; do
+-                source="${entry%%:*}"
+-                destination="${entry#*:}"
+-                real="$(dirname "$source")/.libs/$(basename "$source")"
+-                if [[ -f "$real" ]]; then source="$real"; fi
+-                install -m755 "$source" "$destination/"
+-              done
+-              printf '%s\n' 'Ubuntu 26 Qt wallet: requires the Ubuntu Qt 6 runtime.' \
+-                'Install: sudo apt-get install libqt6widgets6 libqt6network6 libqt6core5compat6 qt6-qpa-plugins' \
+-                > package/README-Qt.txt
+-            elif [[ "$RUNNER_OS" == Linux ]]; then
++            if [[ "$RUNNER_OS" == Linux ]]; then
+               # Copy real executables when libtool generated launcher scripts.
+               for entry in "src/qt/yerbas-qt:package" "src/qt/test/test_yerbas-qt:test-binaries"; do
+                 source="${entry%%:*}"
+@@ -322,9 +277,10 @@ jobs:
+                   exit 1
+                 fi
+               done
++              python3 ci/build-native-qt.py --check-linux-elf package/yerbas-qt
+               QT_QPA_PLATFORM=minimal ./package/yerbas-qt -version
+               # Keep licensing material alongside the archive, not in yerbas-build.
+-              cp -R "$QT_NATIVE_PREFIX/share/licenses" artifacts/licenses
++              cp -R "depends/$HOST_TRIPLE/share/licenses" artifacts/licenses
+               cp COPYING artifacts/COPYING
+             else
+               python3 ci/package-native-qt.py --prefix "$QT_NATIVE_PREFIX"
+@@ -337,17 +293,8 @@ jobs:
+             mkdir test-binaries
+             mv test-runtime.tar.gz test-binaries/
+           fi
+-          if [[ "$PLATFORM_ID" == debian13 ]]; then
+-            sudo apt-get install -y --no-install-recommends squashfs-tools fonts-dejavu-core
+-            (cd appimage-runtime && sha256sum -c SHA256SUMS)
+-            python3 ci/package-debian-appimage.py --binary package/yerbas-qt \
+-              --runtime appimage-runtime/runtime-x86_64 --icon src/qt/res/icons/yerbas.png \
+-              --notices artifacts/appimage-notices
+-            cp appimage-runtime/LICENSE-AppImage-runtime appimage-runtime/runtime-source.txt artifacts/appimage-notices/
+-          fi
+           metadata=artifacts
+-          if [[ "$PLATFORM_ID" == ubuntu26 ]]; then metadata=package; fi
+-          if [[ "$RUNNER_OS" == Linux && "$PLATFORM_ID" != ubuntu26 ]]; then
++          if [[ "$RUNNER_OS" == Linux && "$PLATFORM_ID" != win64 ]]; then
+             test "$(find package -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+             test "$(find package -mindepth 1 -maxdepth 1 | wc -l)" -eq 3
+           elif [[ "$RUNNER_OS" == macOS ]]; then
+@@ -478,22 +425,6 @@ jobs:
+         shell: bash
+         run: tar -xzf test-binaries/test-runtime.tar.gz -C test-binaries
+ 
+-      - name: Install native Linux Qt test runtime
+-        if: runner.os == 'Linux' && matrix.platform.id != 'ubuntu26'
+-        shell: bash
+-        run: |
+-          sudo apt-get update
+-          sudo apt-get install -y libfontconfig1 libxkbcommon-x11-0 libxcb-cursor0 \
+-            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 \
+-            libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-randr0 libx11-xcb1
+-
+-      - name: Install Ubuntu Qt test runtime
+-        if: matrix.platform.id == 'ubuntu26'
+-        shell: bash
+-        run: |
+-          sudo apt-get update
+-          sudo apt-get install -y libqt6widgets6 libqt6network6 libqt6core5compat6 libqt6test6 qt6-qpa-plugins
+-
+       - name: Restore executable permission
+         if: runner.os != 'Windows'
+         shell: bash
+@@ -512,8 +443,6 @@ jobs:
+           mkdir -p test-results
+           if [[ "$RUNNER_OS" == macOS ]]; then
+             ./test-binaries/test_yerbas-qt.app/Contents/MacOS/test_yerbas-qt 2>&1 | tee test-results/qt-tests.log
+-          elif [[ "${{ matrix.platform.id }}" == ubuntu26 ]]; then
+-            QT_QPA_PLATFORM=minimal ./test-binaries/test_yerbas-qt 2>&1 | tee test-results/qt-tests.log
+           else
+             QT_QPA_PLATFORM=minimal ./test-binaries/test_yerbas-qt 2>&1 | tee test-results/qt-tests.log
+           fi
+@@ -559,8 +488,8 @@ jobs:
+           if-no-files-found: error
+           retention-days: 14
+ 
+-  debian-appimage:
+-    name: Debian 13 AppImage (no extra packages)
++  debian-raw-elf:
++    name: Debian 13 ELF on Ubuntu 24.04 (no extra libraries)
+     needs: build
+     if: ${{ !cancelled() }}
+     runs-on: ubuntu-24.04
+@@ -573,10 +502,10 @@ jobs:
+         with:
+           name: yerbas-debian13-binaries
+           path: runtime-artifact
+-      - run: bash ci/test-debian-appimage.sh runtime-artifact runtime-results
++      - run: bash ci/test-debian-raw-elf.sh runtime-artifact runtime-results
+       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+         if: always()
+         with:
+-          name: yerbas-debian13-appimage-results
++          name: yerbas-debian13-elf-results
+           path: runtime-results/
+           if-no-files-found: warn
+diff --git a/build-aux/m4/bitcoin_qt.m4 b/build-aux/m4/bitcoin_qt.m4
+index 683f53debf5e2b6447220ddda9ea78d3872825ac..7c4ba28ce37c1fbb28471188a0bff63a5e1c7eab 100644
+--- a/build-aux/m4/bitcoin_qt.m4
++++ b/build-aux/m4/bitcoin_qt.m4
+@@ -103,7 +103,7 @@ AC_DEFUN([BITCOIN_QT_CONFIGURE],[
+     CPPFLAGS=$TEMP_CPPFLAGS
+     if test "x$bitcoin_cv_static_qt" = xyes; then
+       if { test "x$TARGET_OS" != xlinux && test "x$TARGET_OS" != xwindows; } || test "x`$PKG_CONFIG --variable=yerbas_static_link Qt6Core`" != x1; then
+-        BITCOIN_QT_FAIL([Static Qt requires metadata generated by ci/build-native-qt.py])
++        BITCOIN_QT_FAIL([Static Qt requires Yerbas link metadata. Use the depends Qt build or generate metadata with ci/build-native-qt.py])
+       fi
+       if test "x$TARGET_OS" = xwindows; then
+         # Libtool's -static alone can still link compiler runtime DLLs.
+diff --git a/ci/build-native-qt.py b/ci/build-native-qt.py
+index 61d13ee0c3df55d2f03f907c32e70db8dc5c2ad0..33a43635b2dd8d14bff248d62631d4f64801a6c5 100644
+--- a/ci/build-native-qt.py
++++ b/ci/build-native-qt.py
+@@ -2,6 +2,7 @@
+ """Build native desktop Qt from the same verified sources as Windows depends."""
+ import argparse
+ import hashlib
++import os
+ from pathlib import Path
+ import re
+ import shutil
+@@ -40,9 +41,81 @@ def expand_response_files(tokens, build, active=()):
+     return result
+ 
+ 
+-def static_metadata(prefix, cmake, jobs, host=None):
++# These Linux ABI libraries are supplied by the destination OS.
++LINUX_SYSTEM_LIBRARIES = re.compile(
++    r'^(?:ld-linux[^/]*\.so(?:\.\d+)*|'
++    r'lib(?:c|m|dl|pthread|rt|resolv|gcc_s|stdc\+\+|atomic)\.so(?:\.\d+)*)$'
++)
++DESKTOP_MODULES = (
++    'x11-xcb', 'x11', 'xkbcommon-x11', 'xcb-cursor', 'xcb-icccm', 'xcb-image',
++    'xcb-keysyms', 'xcb-randr', 'xcb-renderutil', 'xcb-shm', 'xcb-sync',
++    'xcb-xfixes', 'xcb-render', 'xcb-shape', 'xcb-xkb', 'xcb-util', 'xcb',
++    'xdmcp', 'fontconfig', 'libbrotlidec',
++)
++
++
++def linux_static_desktop_link(link, prefix, build, staging_prefix):
++    """Resolve the desktop archive closure and test it with the actual Qt probe."""
++    env = os.environ.copy()
++    env.pop('PKG_CONFIG_LIBDIR', None)
++    env['PKG_CONFIG_PATH'] = str(prefix / 'lib/pkgconfig')
++    libraries = shlex.split(subprocess.check_output(
++        ['pkg-config', '--static', '--libs', *DESKTOP_MODULES], text=True, env=env
++    ))
++    search_dirs = [prefix / 'lib', *(Path(flag[2:]) for flag in libraries if flag.startswith('-L'))]
++    archives = {}
++
++    for flag in libraries:
++        if flag.startswith('-L') or flag == '-pthread':
++            continue
++        if not flag.startswith('-l'):
++            raise ValueError(f'Unexpected desktop pkg-config link option: {flag}')
++        name = flag[2:]
++        if LINUX_SYSTEM_LIBRARIES.fullmatch(f'lib{name}.so'):
++            continue
++        archive = f'lib{name}.a'
++        for directory in search_dirs:
++            if (directory / archive).is_file():
++                archives[name] = str(directory / archive)
++                break
++        else:
++            path = subprocess.check_output([link[0], f'-print-file-name={archive}'], text=True).strip()
++            if not Path(path).is_absolute() or not Path(path).is_file():
++                raise ValueError(f'Missing static desktop archive: {archive}. Install its development package on the builder.')
++            archives[name] = os.path.realpath(path)
++
++    # Libtool moves standalone -Wl options ahead of the archives. Keep the
++    # group in a linker script that it passes as a single archive input.
++    group = staging_prefix / 'lib/yerbas-qt/libyerbas-desktop.a'
++    group.parent.mkdir(parents=True, exist_ok=True)
++    members = [
++        f'-l:{Path(path).name}' if Path(path).parent == prefix / 'lib' else f'"{path}"'
++        for path in archives.values()
++    ]
++    group.write_text('/* GNU ld script */\nGROUP ( ' + ' '.join(members) + ' )\n')
++    result = []
++    for item in link:
++        match = re.fullmatch(r'(?:.*/)?lib(.+?)\.so(?:\.\d+)*', item)
++        if (match and match[1] in archives) or (item.startswith('-l') and item[2:] in archives):
++            continue
++        result.append(item)
++    result += [f'-L{prefix}/lib', str(group)]
++    subprocess.run(result, cwd=build, check=True)
++    return result
++
++
++def check_linux_elf(path):
++    dynamic = subprocess.check_output(['readelf', '-dW', path], text=True)
++    needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', dynamic)
++    unexpected = [name for name in needed if not LINUX_SYSTEM_LIBRARIES.fullmatch(name)]
++    if not needed or unexpected or re.search(r'\((?:RPATH|RUNPATH)\)', dynamic):
++        raise ValueError(f'{path}: unexpected ELF runtime dependencies or search path: {unexpected}')
++
++
++def static_metadata(prefix, cmake, jobs, host=None, staging_prefix=None, probe_dir=None):
+     """Resolve static plugins with Qt's CMake targets for our Autotools build."""
+-    probe = prefix / 'static-link'
++    probe = probe_dir or prefix / 'static-link'
++    output_prefix = staging_prefix or prefix
+     probe.mkdir(exist_ok=True)
+     (probe / 'main.cpp').write_text('#include <QApplication>\nint main(int argc, char **argv) { QApplication app(argc, argv); return 0; }\n')
+     platform_plugin = 'QWindowsIntegrationPlugin' if host else 'QXcbIntegrationPlugin'
+@@ -59,6 +132,10 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+     if host:
+         cross_args = ['-DCMAKE_SYSTEM_NAME=Windows', f'-DCMAKE_CXX_COMPILER={host}-g++',
+                       f'-DCMAKE_C_COMPILER={host}-gcc', f'-DQT_HOST_PATH={prefix}/native']
++    if staging_prefix:
++        cross_args += [f'-DQt6Core5Compat_DIR={staging_prefix}/lib/cmake/Qt6Core5Compat',
++                       f'-DCMAKE_MODULE_PATH={staging_prefix}/lib/cmake/Qt6',
++                       f'-DOPENSSL_ROOT_DIR={prefix}', '-DOPENSSL_USE_STATIC_LIBS=ON']
+     run(cmake, '-S', probe, '-B', build, '-G', 'Unix Makefiles',
+         f'-DCMAKE_PREFIX_PATH={prefix}', '-DCMAKE_BUILD_TYPE=Release', *cross_args)
+     run(cmake, '--build', build, '--parallel', jobs)
+@@ -77,11 +154,15 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+     archives = {command[2]: command[3:] for command in commands
+                 if len(command) > 3 and command[1] == 'qc'}
+     link = [item for token in link for item in archives.get(token, [token])]
++    if staging_prefix:
++        link = linux_static_desktop_link(link, prefix, build, staging_prefix)
++        check_linux_elf(build / link[link.index('-o') + 1])
+     output = link.index('-o')
+     # Preserve Qt-generated plugin initialization objects, but not probe main().
+     # Libtool moves shared libraries before static archives. Keep those
+     # dependencies loaded even when their consumers appear later.
+-    flags = ['-Wl,--no-as-needed'] if not host else []
++    flags = ['-Wl,--no-as-needed'] if not host and not staging_prefix else []
++    plugin_objects = output_prefix / 'lib/yerbas-qt'
+     for i, token in enumerate(link[1:], 1):
+         if i in (output, output + 1) or token.endswith(('/main.cpp.o', '/main.cpp.obj')):
+             continue
+@@ -89,6 +170,13 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+             continue
+         if token.endswith(('.o', '.obj')) and not Path(token).is_absolute():
+             token = str(build / token)
++        if staging_prefix and token.endswith(('.o', '.obj')):
++            plugin_objects.mkdir(parents=True, exist_ok=True)
++            source = Path(token)
++            # CMake's imports can share basenames across plugin types.
++            name = f'{i}-{source.name}'
++            shutil.copy2(source, plugin_objects / name)
++            token = f'${{prefix}}/lib/yerbas-qt/{name}'
+         flags.append(token)
+     makeflags = (target / 'flags.make').read_text()
+     cflags = []
+@@ -105,37 +193,59 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+             cflags.append(flag)
+     version = re.search(r'^\$\(package\)_version=(\S+)$',
+                         (ROOT / 'depends/packages/qt.mk').read_text(), re.M).group(1)
+-    pcdir = prefix / 'lib/pkgconfig'
++    pcdir = output_prefix / 'lib/pkgconfig'
+     pcdir.mkdir(exist_ok=True)
+-    tools_prefix = prefix / 'native' if host else prefix
++    if staging_prefix:
++        # The depends cache is reusable after moving the checkout.
++        def relocate(tokens):
++            return [
++                token.replace(str(staging_prefix) + '/', '${prefix}/')
++                     .replace(str(prefix) + '/', '${prefix}/')
++                for token in tokens
++            ]
++        flags = relocate(flags)
++        cflags = relocate(cflags)
++    pc_prefix = '${pcfiledir}/../..' if staging_prefix else str(prefix)
++    tools_prefix = '${prefix}/native' if host else '${prefix}'
+     for module in ('Core', 'Gui', 'Widgets', 'Network', 'Core5Compat', 'Test'):
+         # Put the complete link graph on Core once; duplicate plugin objects
+         # across module flags would define initialization symbols twice.
+         libs = shlex.join(flags) if module == 'Core' else ''
+         (pcdir / f'Qt6{module}.pc').write_text(
+-            f'prefix={prefix}\nyerbas_static_link=1\nlibexecdir={tools_prefix}/libexec\nbindir={tools_prefix}/bin\n'
++            f'prefix={pc_prefix}\nyerbas_static_link=1\nlibexecdir={tools_prefix}/libexec\nbindir={tools_prefix}/bin\n'
+             f'Name: Qt6 {module}\nDescription: Static Qt for Yerbas\nVersion: {version}\n'
+             f'Libs: {libs}\nCflags: {shlex.join(cflags)}\n')
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument('--prefix', type=Path, required=True)
+-    parser.add_argument('--cmake', required=True)
++    parser.add_argument('--check-linux-elf', type=Path, help='Verify the final raw Linux wallet ELF')
++    parser.add_argument('--prefix', type=Path)
++    parser.add_argument('--cmake')
+     parser.add_argument('--jobs', type=int, default=2)
+     parser.add_argument('--static-linux', action='store_true', help='Embed Qt and its plugins on Linux')
+     parser.add_argument('--windows-host', help='Resolve an existing static MinGW Qt prefix')
+     parser.add_argument('--metadata-only', action='store_true', help='Resolve an already built static Qt prefix')
++    parser.add_argument('--staging-prefix', type=Path, help='Emit relocatable metadata in a depends staging prefix')
++    parser.add_argument('--probe-dir', type=Path, help='Build directory for the static plugin link probe')
+     args = parser.parse_args()
++    if args.check_linux_elf:
++        check_linux_elf(args.check_linux_elf)
++        return
++    if not args.prefix or not args.cmake:
++        parser.error('--prefix and --cmake are required for Qt builds or metadata generation')
+     prefix = args.prefix.resolve()
+     if args.static_linux and not sys.platform.startswith('linux'):
+         parser.error('--static-linux requires Linux')
+     if args.windows_host and not args.metadata_only:
+         parser.error('--windows-host requires --metadata-only')
++    if (args.staging_prefix or args.probe_dir) and not (args.static_linux and args.metadata_only):
++        parser.error('--staging-prefix and --probe-dir require --static-linux --metadata-only')
+     if args.metadata_only:
+         if not args.static_linux and not args.windows_host:
+             parser.error('--metadata-only requires --static-linux or --windows-host')
+-        static_metadata(prefix, args.cmake, args.jobs, args.windows_host)
++        static_metadata(prefix, args.cmake, args.jobs, args.windows_host,
++                        args.staging_prefix, args.probe_dir)
+         return
+     sources = ROOT / 'depends/sources'
+     work = ROOT / ('qt-native-static-work' if args.static_linux else 'qt-native-work')
+diff --git a/ci/test-debian-raw-elf.sh b/ci/test-debian-raw-elf.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..cef98acf6236f7087cf22f0eb61b92d1133bc3bc
+--- /dev/null
++++ b/ci/test-debian-raw-elf.sh
+@@ -0,0 +1,86 @@
++#!/usr/bin/env bash
++# Host-side test: the clean Ubuntu runtime receives no desktop packages or network.
++set -euo pipefail
++artifact=$(realpath "${1:?artifact directory}")
++logs=$(realpath -m "${2:?logs directory}")
++mkdir -p "$logs"
++work=$(mktemp -d)
++volume="yerbas-x11-$$"
++xserver="yerbas-xvfb-$$"
++cleanup() {
++  docker rm -f "$xserver" >/dev/null 2>&1 || true
++  docker volume rm "$volume" >/dev/null 2>&1 || true
++  rm -rf "$work"
++}
++trap cleanup EXIT
++image=ubuntu:24.04
++# X server is test infrastructure, never installed in the wallet's container.
++printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends xvfb fonts-dejavu-core\n' "$image" |
++  docker build -t yerbas-elf-xserver - >"$logs/xserver-build.log" 2>&1
++docker volume create "$volume" >/dev/null
++docker run -d --name "$xserver" --network none -v "$volume:/tmp/.X11-unix" \
++  yerbas-elf-xserver Xvfb :99 -screen 0 1024x768x24 -ac -nolisten tcp >/dev/null
++for ((i=0; i<30; i++)); do
++  if docker exec "$xserver" test -S /tmp/.X11-unix/X99; then break; fi
++  sleep 1
++done
++docker exec "$xserver" test -S /tmp/.X11-unix/X99
++cp -a "$artifact" "$work/artifact"
++# Supply desktop data independently of the wallet container's system libraries.
++docker cp "$xserver:/usr/share/fonts" "$work/fonts"
++docker cp "$xserver:/usr/share/X11/xkb" "$work/xkb"
++cat > "$work/run.sh" <<'RUN'
++#!/bin/bash
++set -euo pipefail
++cd /tmp/test
++before=$(dpkg-query -W)
++(cd artifact && sha256sum -c SHA256SUMS)
++archives=(artifact/*.tar.gz)
++[[ ${#archives[@]} == 1 ]]
++tar -xzf "${archives[0]}"
++[[ $(find yerbas-build -mindepth 1 -maxdepth 1 | wc -l) == 3 ]]
++(cd yerbas-build && sha256sum -c ../artifact/BINARY-SHA256SUMS)
++[[ $(od -An -tx1 -N4 yerbas-build/yerbas-qt | xargs) == '7f 45 4c 46' ]]
++! dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' | grep -E '^ii .*(libqt|libxcb|libxkbcommon|libfontconfig|libx11|libbrotli)'
++ldd -r yerbas-build/yerbas-qt > libraries.log 2>&1
++cat libraries.log
++if grep -E 'not found|undefined symbol|libQt|libxcb|libX11|libxkbcommon|libfontconfig' libraries.log; then
++  exit 1
++fi
++export HOME=/tmp/test/home
++export XKB_CONFIG_ROOT=/tmp/test/xkb
++export FONTCONFIG_FILE=/tmp/test/fonts.conf
++printf '<fontconfig><dir>/tmp/test/fonts</dir><cachedir>/tmp/test/home/.cache/fontconfig</cachedir></fontconfig>\n' > "$FONTCONFIG_FILE"
++mkdir "$HOME"
++for name in yerbas-cli yerbasd yerbas-qt; do ./yerbas-build/$name -version; done
++mkdir data
++./yerbas-build/yerbas-qt -regtest -datadir=/tmp/test/data -server -listen=0 -connect=0 -dnsseed=0 -upnp=0 -splash=0 >gui.log 2>&1 &
++pid=$!
++trap 'cat gui.log; cat data/regtest/debug.log 2>/dev/null || true; kill "$pid" 2>/dev/null || true' EXIT
++ready=false
++for ((i=0; i<90; i++)); do
++  kill -0 "$pid"
++  if ./yerbas-build/yerbas-cli -regtest -datadir=/tmp/test/data getblockchaininfo 2>/dev/null; then ready=true; break; fi
++  sleep 1
++done
++[[ "$ready" == true ]]
++./yerbas-build/yerbas-cli -regtest -datadir=/tmp/test/data getwalletinfo
++./yerbas-build/yerbas-cli -regtest -datadir=/tmp/test/data stop
++for ((i=0; i<30; i++)); do
++  if ! kill -0 "$pid" 2>/dev/null; then
++    wait "$pid"
++    [[ "$before" == "$(dpkg-query -W)" ]]
++    echo 'PASS: packaged raw ELF graphical wallet on Ubuntu 24.04 without extra runtime packages'
++    exit 0
++  fi
++  sleep 1
++done
++exit 1
++RUN
++# Transfer input by stdin: avoids exposing the host checkout or any user wallet.
++tar -czf - -C "$work" . | docker run --rm -i --user 65534:65534 --network none \
++  -e DISPLAY=:99 -e QT_QPA_PLATFORM=xcb -e LC_ALL=C.UTF-8 \
++  -v "$volume:/tmp/.X11-unix:ro" "$image" \
++  bash -c 'mkdir /tmp/test; tar -xz -C /tmp/test; bash /tmp/test/run.sh' \
++  >"$logs/runtime.log" 2>&1
++cat "$logs/runtime.log"
+diff --git a/ci/tests/test_static_qt_metadata.py b/ci/tests/test_static_qt_metadata.py
+index ef17088903bf3837e0eceeeb40e9a9d5bac8bc36..23a1d72264f937596c45426fb1b40e29e4872469 100644
+--- a/ci/tests/test_static_qt_metadata.py
++++ b/ci/tests/test_static_qt_metadata.py
+@@ -1,4 +1,4 @@
+-"""Regression coverage for CMake's MinGW response-file flags."""
++"""Regression coverage for exporting CMake static Qt linker flags."""
+ import importlib.util
+ from pathlib import Path
+ import tempfile
+@@ -42,6 +42,36 @@ class StaticMetadataTests(unittest.TestCase):
+             self.assertIn('-I/qt/QtWidgets', pc)
+             self.assertNotIn('-isystem', pc)
+ 
++    def test_depends_metadata_copies_plugins_and_relocates_prefix(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            prefix = root / 'depends'
++            staging = root / 'stage'
++            probe = root / 'probe'
++            target = probe / 'build/CMakeFiles/qt_link_probe.dir'
++            target.mkdir(parents=True)
++            (target / 'plugin.cpp.o').write_bytes(b'plugin object')
++            (target / 'flags.make').write_text(
++                f'CXX_DEFINES = -DQT_STATIC\nCXX_INCLUDES = -isystem {prefix}/include/QtCore\n')
++            (target / 'link.txt').write_text(
++                'c++ CMakeFiles/qt_link_probe.dir/main.cpp.o '
++                'CMakeFiles/qt_link_probe.dir/plugin.cpp.o -o qt_link_probe '
++                f'{staging}/lib/libQt6Core5Compat.a {prefix}/lib/libQt6Core.a -lxcb\n')
++            with (patch.object(BUILD, 'run'),
++                  patch.object(BUILD, 'linux_static_desktop_link', side_effect=lambda link, *_: link),
++                  patch.object(BUILD, 'check_linux_elf')):
++                BUILD.static_metadata(prefix, 'cmake', 2, staging_prefix=staging, probe_dir=probe)
++            pc = (staging / 'lib/pkgconfig/Qt6Core.pc').read_text()
++            self.assertNotIn(str(root), pc)
++            self.assertIn('prefix=${pcfiledir}/../..', pc)
++            self.assertIn('${prefix}/include/QtCore', pc)
++            self.assertIn('${prefix}/lib/libQt6Core5Compat.a', pc)
++            self.assertIn('${prefix}/lib/libQt6Core.a', pc)
++            self.assertIn('-lxcb', pc)
++            self.assertIn('${prefix}/lib/yerbas-qt/2-plugin.cpp.o', pc)
++            self.assertEqual((staging / 'lib/yerbas-qt/2-plugin.cpp.o').read_bytes(),
++                             b'plugin object')
++
+     def test_missing_response_file_fails_early(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             with self.assertRaises(FileNotFoundError):
+diff --git a/configure.ac b/configure.ac
+index e2014227bd2c4e9edf367173cd4cdedac9347e0e..d704db78e19c4db6290abc8977423bc73aa4b9de 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -948,7 +948,7 @@ fi
+ BITCOIN_QT_INIT
+ 
+ dnl sets $bitcoin_enable_qt, $bitcoin_enable_qt_test, $bitcoin_enable_qt_dbus
+-dnl Native GUI builds use shared system Qt 6.8 or newer.
++dnl Both depends and system GUI builds require Qt 6.8 or newer.
+ BITCOIN_QT_CONFIGURE([6.8.0])
+ 
+ if test x$build_bitcoin_utils$build_bitcoind$bitcoin_enable_qt$use_tests$use_bench = xnonononono; then
+diff --git a/depends/Makefile b/depends/Makefile
+index 6bce51a09bee5f44351d9c3c030fdb86805f60e4..f2c7983162a0e3f00fbaa1e99a77887caacb548f 100644
+--- a/depends/Makefile
++++ b/depends/Makefile
+@@ -93,11 +93,10 @@ $(host_arch)_$(host_os)_id_string+=$(shell $(host_CXX) --version 2>/dev/null)
+ $(host_arch)_$(host_os)_id_string+=$(shell $(host_RANLIB) --version 2>/dev/null)
+ $(host_arch)_$(host_os)_id_string+=$(shell $(host_STRIP) --version 2>/dev/null)
+ 
+-# Plain make selects the supported GUI dependency path on native Linux.
+-# Explicit headless/cross-build choices must not inherit that default.
++# Native Linux defaults to static Qt. Native macOS keeps using its desktop Qt.
+ ifeq ($(NO_QT),)
+-ifeq ($(build_os),linux)
+-ifeq ($(canonical_host),$(build))
++ifeq ($(host_arch)_$(host_os),$(build_arch)_$(build_os))
++ifeq ($(host_os),darwin)
+ USE_SYSTEM_QT ?= 1
+ endif
+ endif
+@@ -118,8 +117,10 @@ ifeq ($(NO_QT),)
+ ifeq ($(build_os)_$(host_os)_$(host_arch),linux_mingw32_x86_64)
+ qt_packages_ = $(qt_packages) qt qt5compat
+ qt_native_packages = native_qt native_qttools
++else ifeq ($(build_os)_$(host_os)_$(build_arch),linux_linux_$(host_arch))
++qt_packages_ = $(qt_packages) xkbcommon qt qt5compat qttools
+ else
+-$(error GUI dependencies require USE_SYSTEM_QT=1 for native builds or Linux to x86_64-w64-mingw32. Use NO_QT=1 only for headless builds)
++$(error GUI dependencies support native Linux/macOS and Linux to x86_64-w64-mingw32. Use NO_QT=1 for other targets)
+ endif
+ endif
+ endif
+@@ -139,6 +140,10 @@ meta_depends = Makefile funcs.mk builders/default.mk hosts/default.mk hosts/$(ho
+ 
+ $(host_arch)_$(host_os)_native_toolchain?=$($(host_os)_native_toolchain)
+ 
++ifeq ($(host_os),linux)
++qt5compat_recipe_inputs = ../ci/build-native-qt.py
++endif
++
+ include funcs.mk
+ 
+ toolchain_path=$($($(host_arch)_$(host_os)_native_toolchain)_prefixbin)
+diff --git a/depends/README.md b/depends/README.md
+index a0514205b052e565a6415071d4024f2752a66a75..63756aeeb17e694e1776a6145968d85f00c3c83b 100644
+--- a/depends/README.md
++++ b/depends/README.md
+@@ -1,15 +1,12 @@
+ For a BDB-only build without sudo or Qt, run `sh contrib/build-bdb.sh` from
+ the repository root. See [local Berkeley DB instructions](../doc/berkeley-db-local.md).
+ 
+-For a native Linux GUI using installed Qt 6.8 or newer, see
+-[the local GUI build instructions](../doc/local-gui-build.md). Plain `make` selects
+-`USE_SYSTEM_QT=1` automatically on native Linux; the bundled Qt 5 path is retired.
+-Qt itself is not downloaded or installed: provide Qt 6.8+ development packages
+-(including Core5Compat) before configuring the application. Headless builds require
+-`NO_QT=1`. A Windows Qt cross-build dependency path is being restored for
+-`HOST=x86_64-w64-mingw32`; its full build and runtime packaging are not yet verified.
+-The Windows CI job now selects GUI dependencies and packages the Qt wallet; see
+-[Windows builds](../doc/build-windows.md). Hosted validation remains pending.
++Native Linux builds compile the pinned static Qt 6 SDK by default. See the
++[local GUI build instructions](../doc/local-gui-build.md) for XCB build
++dependencies, runtime checks, and distribution requirements. Use
++`USE_SYSTEM_QT=1` to select an installed Qt 6.8+ SDK, or `NO_QT=1` for a headless
++build. Native macOS uses an installed SDK. The Linux-to-MinGW build uses pinned
++Qt and matching host tools. See [Windows builds](../doc/build-windows.md).
+ 
+ For the current headless CI dependency pins, validation status, and manual
+ rebuild commands, see [dependency updates](../doc/dependency-updates.md).
+@@ -20,8 +17,7 @@ To build dependencies for the native Linux graphical wallet:
+ 
+     make -j10
+ 
+-This automatically selects `USE_SYSTEM_QT=1`. The explicit command
+-`make -j10 USE_SYSTEM_QT=1` remains supported.
++This builds static Qt. `make -j10 USE_SYSTEM_QT=1` selects an installed SDK.
+ 
+ To build headless dependencies for the current arch+OS:
+ 
+@@ -79,7 +75,7 @@ The following can be set when running make: make FOO=bar
+     SOURCES_PATH: downloaded sources will be placed here
+     BASE_CACHE: built packages will be placed here
+     FALLBACK_DOWNLOAD_PATH: If a source file can't be fetched, try here before giving up
+-    USE_SYSTEM_QT: Defaults to 1 on native Linux unless NO_QT is set; uses installed Qt 6.8+
++    USE_SYSTEM_QT: Use installed Qt 6.8+ instead of building Qt (default on native macOS)
+     NO_QT: Don't download/build/cache qt and its dependencies
+     NO_WALLET: Don't download/build/cache libs needed to enable the wallet
+     NO_UPNP: Don't download/build/cache packages needed for enabling upnp
+diff --git a/depends/config.site.in b/depends/config.site.in
+index 666c3d30240fd030b1540fb3962dd137f018a366..98edbf094562614efe77acc3fcd3ef95d4c6a672 100644
+--- a/depends/config.site.in
++++ b/depends/config.site.in
+@@ -8,18 +8,20 @@ if test -z $with_boost; then
+   with_boost=$depends_prefix
+ fi
+ if test "x@use_system_qt@" != x1; then
+-if test -z $with_qt_plugindir; then
+-  with_qt_plugindir=$depends_prefix/plugins
+-fi
+-if test -z $with_qt_translationdir; then
+-  with_qt_translationdir=$depends_prefix/translations
+-fi
+-if test -z $with_qt_bindir; then
+-  with_qt_bindir=$depends_prefix/native/bin
+-fi
+-if test -z "$with_qt_libexecdir"; then
+-  with_qt_libexecdir=$depends_prefix/native/libexec
+-fi
++  if test -z "$with_qt_plugindir"; then
++    with_qt_plugindir=$depends_prefix/plugins
++  fi
++  if test -z "$with_qt_translationdir"; then
++    with_qt_translationdir=$depends_prefix/translations
++  fi
++  if test "x@host_os@" = xmingw32; then
++    if test -z "$with_qt_bindir"; then
++      with_qt_bindir=$depends_prefix/native/bin
++    fi
++    if test -z "$with_qt_libexecdir"; then
++      with_qt_libexecdir=$depends_prefix/native/libexec
++    fi
++  fi
+ fi
+ 
+ 
+diff --git a/depends/funcs.mk b/depends/funcs.mk
+index 5c05a4e7c29c7481ef5c441e8291d9aa539875a6..7feb29db406fd2b7435800628f815e51331c2d4a 100644
+--- a/depends/funcs.mk
++++ b/depends/funcs.mk
+@@ -37,7 +37,7 @@ define fetch_file
+ endef
+ 
+ define int_get_build_recipe_hash
+-$(eval $(1)_all_file_checksums:=$(shell $(build_SHA256SUM) $(meta_depends) packages/$(1).mk $(addprefix $(PATCHES_PATH)/$(1)/,$($(1)_patches)) | cut -d" " -f1))
++$(eval $(1)_all_file_checksums:=$(shell $(build_SHA256SUM) $(meta_depends) packages/$(1).mk $($(1)_recipe_inputs) $(addprefix $(PATCHES_PATH)/$(1)/,$($(1)_patches)) | cut -d" " -f1))
+ $(eval $(1)_recipe_hash:=$(shell echo -n "$($(1)_all_file_checksums)" | $(build_SHA256SUM) | cut -d" " -f1))
+ endef
+ 
+diff --git a/depends/packages/qt.mk b/depends/packages/qt.mk
+index 8595d74126a754d53c7890ba61e3a0cfd94be932..b69387e3f0ca2259fcdd3540772e99403e5e04d3 100644
+--- a/depends/packages/qt.mk
++++ b/depends/packages/qt.mk
+@@ -4,26 +4,46 @@ $(package)_version=6.12.0
+ $(package)_download_path=https://download.qt.io/official_releases/qt/6.12/$($(package)_version)/submodules
+ $(package)_file_name=qtbase-everywhere-src-$($(package)_version).tar.xz
+ $(package)_sha256_hash=a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307
+-$(package)_dependencies=native_qt native_qttools
++$(package)_dependencies=native_cmake
++$(package)_mingw32_dependencies=native_qt native_qttools
++$(package)_linux_dependencies=openssl xkbcommon
++
++$(package)_config_opts_mingw32 = \
++    -DCMAKE_SYSTEM_NAME=Windows \
++    -DFEATURE_schannel=ON \
++    -DFEATURE_openssl=OFF \
++    -DCMAKE_RC_COMPILER="$(host)-windres" \
++    -DQT_HOST_PATH=$(build_prefix) \
++    -DCMAKE_FIND_ROOT_PATH=$(host_prefix) \
++    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
++    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
++    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
++    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
++
++# Qt's FindXCB uses the host pkg-config paths for extension headers.
++$(package)_config_opts_linux = \
++    -DFEATURE_xcb=ON \
++    -DFEATURE_glib=OFF \
++    -DFEATURE_vulkan=OFF \
++    -DFEATURE_xcb_sm=OFF \
++    -DINPUT_openssl=linked \
++    -DOPENSSL_ROOT_DIR="$(host_prefix)" \
++    -DOPENSSL_USE_STATIC_LIBS=ON
+ 
+ define $(package)_config_cmds
++  $(if $(filter linux,$(host_os)),env -u PKG_CONFIG_LIBDIR PKG_CONFIG_PATH="$(host_prefix)/lib/pkgconfig") \
+   $(build_prefix)/bin/cmake -S . -B build -G "Unix Makefiles" \
+     -DCMAKE_INSTALL_PREFIX=$(host_prefix) \
+     -DCMAKE_BUILD_TYPE=Release \
++    -DCMAKE_C_COMPILER="$(firstword $(host_CC))" \
++    -DCMAKE_C_COMPILER_ARG1="$(wordlist 2,99,$(host_CC))" \
++    -DCMAKE_CXX_COMPILER="$(firstword $(host_CXX))" \
++    -DCMAKE_CXX_COMPILER_ARG1="$(wordlist 2,99,$(host_CXX))" \
+     -DBUILD_SHARED_LIBS=OFF \
+     -DQT_BUILD_TESTS=OFF \
+     -DQT_BUILD_EXAMPLES=OFF \
+     -DCMAKE_INSTALL_LIBDIR=lib \
+-    -DCMAKE_SYSTEM_NAME=Windows \
+-    -DCMAKE_C_COMPILER="$(host_CC)" \
+-    -DCMAKE_CXX_COMPILER="$(host_CXX)" \
+-    -DCMAKE_RC_COMPILER="$(host)-windres" \
+-    -DQT_HOST_PATH=$(build_prefix) \
+-    -DCMAKE_FIND_ROOT_PATH=$(host_prefix) \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
++    $($(package)_config_opts) \
+     -DFEATURE_system_zlib=OFF \
+     -DFEATURE_system_pcre2=OFF \
+     -DFEATURE_system_doubleconversion=OFF \
+@@ -32,8 +52,6 @@ define $(package)_config_cmds
+     -DFEATURE_zstd=OFF \
+     -DFEATURE_dbus=OFF \
+     -DFEATURE_sql=OFF \
+-    -DFEATURE_openssl=OFF \
+-    -DFEATURE_schannel=ON \
+     -DFEATURE_opengl=OFF \
+     -DINPUT_opengl=no \
+     -DFEATURE_system_freetype=OFF \
+diff --git a/depends/packages/qt5compat.mk b/depends/packages/qt5compat.mk
+index 54e73805c23dbb6c5f9e3530fb6978892b916855..39cf183b8b0011082d358fb51d8901ec58c926ac 100644
+--- a/depends/packages/qt5compat.mk
++++ b/depends/packages/qt5compat.mk
+@@ -8,24 +8,42 @@ $(package)_dependencies=qt
+ 
+ # Qt 6.12.0 already contains both CVE-2026-101201 corrections.
+ 
++$(package)_config_opts_mingw32 = \
++    -DCMAKE_SYSTEM_NAME=Windows \
++    -DCMAKE_RC_COMPILER="$(host)-windres" \
++    -DQT_HOST_PATH=$(build_prefix) \
++    -DCMAKE_FIND_ROOT_PATH=$(host_prefix) \
++    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
++    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
++    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
++    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
++
++$(package)_config_opts_linux = \
++    -DOPENSSL_ROOT_DIR="$(host_prefix)" \
++    -DOPENSSL_USE_STATIC_LIBS=ON
++
++ifeq ($(host_os),linux)
++$(package)_stage_metadata = && \
++  python3 $(BASEDIR)/../ci/build-native-qt.py --static-linux --metadata-only \
++    --prefix "$(host_prefix)" --staging-prefix "$($(package)_staging_prefix_dir)" \
++    --probe-dir "$($(package)_build_dir)/static-link" \
++    --cmake "$(build_prefix)/bin/cmake"
++endif
++
+ define $(package)_config_cmds
++  $(if $(filter linux,$(host_os)),env -u PKG_CONFIG_LIBDIR PKG_CONFIG_PATH="$(host_prefix)/lib/pkgconfig") \
+   $(build_prefix)/bin/cmake -S . -B build -G "Unix Makefiles" \
+     -DCMAKE_INSTALL_PREFIX=$(host_prefix) \
+     -DCMAKE_BUILD_TYPE=Release \
++    -DCMAKE_C_COMPILER="$(firstword $(host_CC))" \
++    -DCMAKE_C_COMPILER_ARG1="$(wordlist 2,99,$(host_CC))" \
++    -DCMAKE_CXX_COMPILER="$(firstword $(host_CXX))" \
++    -DCMAKE_CXX_COMPILER_ARG1="$(wordlist 2,99,$(host_CXX))" \
+     -DBUILD_SHARED_LIBS=OFF \
+     -DQT_BUILD_TESTS=OFF \
+     -DQT_BUILD_EXAMPLES=OFF \
+     -DCMAKE_INSTALL_LIBDIR=lib \
+-    -DCMAKE_SYSTEM_NAME=Windows \
+-    -DCMAKE_C_COMPILER="$(host_CC)" \
+-    -DCMAKE_CXX_COMPILER="$(host_CXX)" \
+-    -DCMAKE_RC_COMPILER="$(host)-windres" \
+-    -DQT_HOST_PATH=$(build_prefix) \
+-    -DCMAKE_FIND_ROOT_PATH=$(host_prefix) \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+-    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
++    $($(package)_config_opts) \
+     -DCMAKE_PREFIX_PATH=$(host_prefix)
+ endef
+ 
+@@ -36,5 +54,5 @@ endef
+ define $(package)_stage_cmds
+   DESTDIR=$($(package)_staging_dir) $(build_prefix)/bin/cmake --install build && \
+   mkdir -p $($(package)_staging_prefix_dir)/share/licenses/qt5compat && \
+-  cp -R LICENSES/. $($(package)_staging_prefix_dir)/share/licenses/qt5compat/
++  cp -R LICENSES/. $($(package)_staging_prefix_dir)/share/licenses/qt5compat/ $($(package)_stage_metadata)
+ endef
+diff --git a/depends/packages/qttools.mk b/depends/packages/qttools.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6639270991eaf4f31d912de84a5550143c8523f
+--- /dev/null
++++ b/depends/packages/qttools.mk
+@@ -0,0 +1,45 @@
++# Qt Linguist tools for the native static Linux build.
++package=qttools
++$(package)_version=6.12.0
++$(package)_download_path=https://download.qt.io/official_releases/qt/6.12/$($(package)_version)/submodules
++$(package)_file_name=qttools-everywhere-src-$($(package)_version).tar.xz
++$(package)_sha256_hash=8dab8f3611496486a470ad5f115ceea584f36bc22a2b8b6f6ebdbafbb8160693
++$(package)_dependencies=qt
++
++define $(package)_config_cmds
++  env -u PKG_CONFIG_LIBDIR PKG_CONFIG_PATH="$(host_prefix)/lib/pkgconfig" $(build_prefix)/bin/cmake -S . -B build -G "Unix Makefiles" \
++    -DCMAKE_INSTALL_PREFIX=$(host_prefix) \
++    -DCMAKE_BUILD_TYPE=Release \
++    -DBUILD_SHARED_LIBS=OFF \
++    -DQT_BUILD_TESTS=OFF \
++    -DQT_BUILD_EXAMPLES=OFF \
++    -DCMAKE_INSTALL_LIBDIR=lib \
++    -DCMAKE_C_COMPILER="$(firstword $(host_CC))" \
++    -DCMAKE_C_COMPILER_ARG1="$(wordlist 2,99,$(host_CC))" \
++    -DCMAKE_CXX_COMPILER="$(firstword $(host_CXX))" \
++    -DCMAKE_CXX_COMPILER_ARG1="$(wordlist 2,99,$(host_CXX))" \
++    -DCMAKE_PREFIX_PATH=$(host_prefix) \
++    -DOPENSSL_ROOT_DIR="$(host_prefix)" \
++    -DOPENSSL_USE_STATIC_LIBS=ON \
++    -DFEATURE_assistant=OFF \
++    -DFEATURE_designer=OFF \
++    -DFEATURE_qdoc=OFF \
++    -DFEATURE_clang=OFF \
++    -DFEATURE_distancefieldgenerator=OFF \
++    -DFEATURE_pixeltool=OFF \
++    -DFEATURE_qdbus=OFF \
++    -DFEATURE_qtdiag=OFF \
++    -DFEATURE_qtplugininfo=OFF \
++    -DFEATURE_kmap2qmap=OFF \
++    -DFEATURE_linguist=ON
++endef
++
++define $(package)_build_cmds
++  $(MAKE) -C build
++endef
++
++define $(package)_stage_cmds
++  DESTDIR=$($(package)_staging_dir) $(build_prefix)/bin/cmake --install build && \
++  mkdir -p $($(package)_staging_prefix_dir)/share/licenses/qttools && \
++  cp -R LICENSES/. $($(package)_staging_prefix_dir)/share/licenses/qttools/
++endef
+diff --git a/depends/packages/xkbcommon.mk b/depends/packages/xkbcommon.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac46eb499f0d1d3a051fbad0fbbf245995c789c2
+--- /dev/null
++++ b/depends/packages/xkbcommon.mk
+@@ -0,0 +1,24 @@
++package=xkbcommon
++$(package)_version=1.7.0
++$(package)_download_path=https://xkbcommon.org/download
++$(package)_file_name=libxkbcommon-$($(package)_version).tar.xz
++$(package)_sha256_hash=65782f0a10a4b455af9c6baab7040e2f537520caa2ec2092805cdfd36863b247
++
++define $(package)_config_cmds
++  env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH CC="$(host_CC)" \
++    meson setup build --prefix="$(host_prefix)" --libdir=lib --buildtype=release \
++      --default-library=static -Db_staticpic=true -Denable-x11=true \
++      -Denable-tools=false -Denable-wayland=false -Denable-xkbregistry=false \
++      -Denable-bash-completion=false -Dxkb-config-root=/usr/share/X11/xkb \
++      -Dx-locale-root=/usr/share/X11/locale
++endef
++
++define $(package)_build_cmds
++  meson compile -C build -j 2
++endef
++
++define $(package)_stage_cmds
++  DESTDIR=$($(package)_staging_dir) meson install -C build --no-rebuild && \
++  mkdir -p $($(package)_staging_prefix_dir)/share/licenses/xkbcommon && \
++  cp LICENSE $($(package)_staging_prefix_dir)/share/licenses/xkbcommon/
++endef
+diff --git a/doc/ci-qt-artifacts.md b/doc/ci-qt-artifacts.md
+index 0e02532eb5063d3ea9f34d8df0054dc39e474cbe..8c186e01da8546fba2174d13214929b5bf18e507 100644
+--- a/doc/ci-qt-artifacts.md
++++ b/doc/ci-qt-artifacts.md
+@@ -7,7 +7,7 @@ suites and Qt wallet tests on every platform in its matrix:
+ | --- | --- | --- |
+ | Ubuntu 22 x86_64 | Pinned static Qt sources from depends | `yerbas-build/yerbas-qt` |
+ | Ubuntu 24 x86_64 | Pinned static Qt sources from depends | `yerbas-build/yerbas-qt` |
+-| Ubuntu 26 x86_64 | Ubuntu Qt packages, minimum 6.8 enforced | `yerbas-build/yerbas-qt` |
++| Ubuntu 26 x86_64 | Pinned static Qt sources from depends | `yerbas-build/yerbas-qt` |
+ | Debian 13 x86_64 | Pinned static Qt sources from depends | `yerbas-build/yerbas-qt` |
+ | Ubuntu 24 ARM64 | Pinned static Qt sources from depends | `yerbas-build/yerbas-qt` |
+ | macOS 15 Intel | Pinned Qt sources from depends | `yerbas-build/Yerbas-Qt.app` |
+@@ -19,22 +19,19 @@ from `configure.ac` and `build.properties`; the archive also records the commit
+ and host and includes checksums. Use the artifact matching your OS and CPU.
+ This matrix does not provide a native Apple Silicon build.
+ 
+-Ubuntu 22/24 (including ARM64) archives contain exactly three real executables in `yerbas-build/`:
++Linux archives contain exactly three real executables in `yerbas-build/`:
+ `yerbas-cli`, `yerbasd`, and `yerbas-qt`. Qt and its selected plugins are linked
+ into the wallet; there is no Qt launcher or separate Qt runtime directory.
+-The binaries still use the target Ubuntu release's system C/C++ and desktop
+-libraries (including X11/XCB, fontconfig and xkbcommon). They are not fully
+-static, distribution-independent Linux binaries.
++The wallet links X11/XCB, fontconfig and xkbcommon statically. It uses the
++system C/C++ runtimes and needs a compatible display, fonts and keyboard data.
+ 
+-For these Ubuntu builds, `build-info.txt`, `BINARY-SHA256SUMS`, Qt license files and the archive
++For these Linux builds, `build-info.txt`, `BINARY-SHA256SUMS`, Qt license files and the archive
+ checksum are alongside the versioned archive in the Actions artifact, not inside
+ `yerbas-build/`. Release publication must preserve that metadata and licensing
+ material as separate assets. `BINARY-SHA256SUMS` is checked from inside the
+ extracted `yerbas-build/` directory. Existing published archives are unchanged
+ until builds from this packaging change have passed validation and are uploaded.
+ 
+-Ubuntu 26 retains its current system-Qt build and package layout.
+-
+ The macOS application includes its Qt dependencies via `macdeployqt` and is
+ ad-hoc signed. It requires macOS 15 or newer on Intel and is not notarized or
+ Developer ID signed. Its archive contains the app bundle, daemon and CLI;
+@@ -43,16 +40,13 @@ Qt and compiler runtimes, with only `yerbasd.exe`, `yerbas-cli.exe` and
+ `yerbas-qt.exe` in the binary directory. Packaging rejects non-system DLL imports;
+ notices and checksums remain alongside the archive.
+ 
+-`ci/build-native-qt.py` reads versions and SHA-256 hashes from the existing Qt
+-recipes in `depends/packages`; downloads must match those hashes before they
+-are extracted. The native Qt cache is separate for each runner platform and
+-invalidated when its builder or source recipes change. `QT_NATIVE_PREFIX`
+-selects that Qt installation in the native `USE_SYSTEM_QT=1` configure path.
+-On Linux, `--static-linux` uses Qt's CMake targets to resolve libraries and
+-static plugin initialization objects, then generates pkg-config metadata for
+-Autotools. This avoids guessing the transitive link order. Configure accepts
+-static Qt only with this generated Linux metadata. macOS keeps its shared-Qt app bundle. Windows resolves the static link metadata
+-with `--metadata-only --windows-host x86_64-w64-mingw32`. The pinned Core dependencies are unchanged.
++The static Linux builds use the default depends Qt SDK. Its Core5Compat recipe
++uses Qt's CMake targets to resolve libraries and static plugin initialization
++objects and emits pkg-config metadata for Autotools. macOS uses
++`ci/build-native-qt.py` to build the shared Qt SDK and sets `QT_NATIVE_PREFIX`
++for configure. Windows uses the same script to resolve static link metadata
++with `--metadata-only --windows-host x86_64-w64-mingw32`. Qt source versions and
++archive checksums are pinned in `depends/packages`.
+ 
+ Native test artifacts are tar archives to retain executable modes and library
+ symlinks. Test jobs run the packaged GUI test executable on each target, using
+@@ -73,26 +67,9 @@ are provided alongside the archive. No `.deb` installer is generated.
+ The Debian test job runs the packaged unit and Qt test executables in a separate
+ Debian 13 container. Release publication should wait for both jobs to pass.
+ 
+-### Debian 13 AppImage
+-
+-The Debian 13 x86-64 package contains exactly three files under `yerbas-build/`:
+-`yerbas-cli`, `yerbasd`, and `yerbas-qt`. The GUI file is a type-2 AppImage (not a
+-shell launcher). Qt, the required XCB/X11/font libraries, and a fallback font are
+-inside it. Normal invocation is `./yerbas-qt`; no FUSE package, environment variable,
+-or extra launch argument is required. The pinned official AppImage runtime is built
+-with its extract-and-run path enabled by default. Temporary extraction requires
+-writable executable temporary storage and additional disk space during execution.
+-The supported host remains Debian 13 x86-64 with its glibc and a graphical display;
+-this does not promise compatibility with older distributions.
+-
+-`ci/package-debian-appimage.py` copies the dependency closure, excluding host glibc
+-and its loader, and collects Debian copyright notices outside the application
+-archive. The AppImage runtime source pin and license accompany those notices.
+-Other platform packaging remains unchanged.
++### Debian 13 raw ELF runtime check
+ 
+-`Debian 13 AppImage (no extra packages)` checks the final archive in a pristine,
+-pinned Debian container with no package installation, no FUSE device, no network,
+-and a non-root user. Xvfb lives in a separate test-infrastructure container. The
+-check verifies checksums, the three-file layout, version output, graphical startup,
+-wallet/blockchain RPC, and clean shutdown, then confirms the installed package list
+-has not changed. It does not exercise every GUI action or mainnet synchronization.
++CI extracts the Debian build archive into a clean Ubuntu 24.04 runtime with
++no desktop library packages installed. Xvfb, fonts and keyboard data come
++from separate test infrastructure. The test checks the ELF, starts the wallet
++under XCB, exercises regtest wallet and blockchain RPCs, and checks shutdown.
+diff --git a/doc/local-gui-build.md b/doc/local-gui-build.md
+index 70e2761bb96d60356011b85577f715f65aa637f1..adb1adade1b5a6955089fc617b117ffb5088542e 100644
+--- a/doc/local-gui-build.md
++++ b/doc/local-gui-build.md
+@@ -1,16 +1,10 @@
+ # Local Linux GUI build: Qt 6
+ 
+-Yerbas 4.0.1.3 uses shared Qt **6.8 or newer**, including Core5Compat.
+-Boost is pinned to **1.92.0**. The native Linux build uses the operating system's
+-Qt packages or an explicitly supplied Qt SDK. The release workflow builds pinned
+-Qt 6.12.0 for Ubuntu 22/24/ARM64 and macOS, while Ubuntu 26 uses distribution Qt.
+-See [CI artifacts](ci-qt-artifacts.md) for runtime packaging details.
+-
+-The bundled Qt 5 path is retired. For native Linux, depends defaults to
+-`USE_SYSTEM_QT=1`; `NO_QT=1` selects a headless build. Supply Qt separately when
+-using this native path. Windows uses matching cross-built Qt and host tools.
+-All six release CI platforms build Qt wallets and run dependent tests.
+-
++The native Linux depends build compiles pinned static Qt 6.12.0, including
++Core5Compat, the XCB platform plugin and its desktop libraries. Bake can package the resulting
++`src/qt/yerbas-qt` executable directly. System Qt 6.8 or newer is also supported
++with `USE_SYSTEM_QT=1`. Use `NO_QT=1` for a headless depends build.
++See [CI artifacts](ci-qt-artifacts.md) for the release workflow's packaging.
+ 
+ ## Features and compatibility
+ 
+@@ -31,40 +25,91 @@ regression test now uses a deterministic Qt random generator.
+ 
+ ## Manual build
+ 
+-Provide Qt 6.8+ development libraries and tools (Core, Gui, Widgets, Network,
+-Core5Compat, Test and Linguist), plus a compiler, Autotools, pkg-config, Perl and
+-Python. An existing system installation or a user-owned Qt SDK can be used; for
+-a local SDK, put its pkg-config directory on PKG_CONFIG_PATH. Berkeley DB does
+-not require system installation: see [berkeley-db-local.md](berkeley-db-local.md)
+-for the independent, unprivileged BDB-only build.
+-
+-```bash
+-cd /home/anno/Code/yerbas
+-make -C depends -j2 NO_UPNP=1
+-# Clean old objects if this checkout already has a generated Makefile.
+-make clean
++Allow at least 10 GB of free disk space for the build. Install the build tools
++and XCB development libraries on Debian 13:
++
++```sh
++sudo apt-get install build-essential autoconf automake libtool pkg-config \
++  curl ca-certificates perl python3 bsdextrautils xz-utils bzip2 \
++  meson ninja-build bison libbrotli-dev \
++  libfontconfig1-dev libx11-xcb-dev libxcb1-dev libxcb-cursor-dev \
++  libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-util-dev \
++  libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev \
++  libxcb-shape0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev \
++  libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
++```
++
++Qt's `xcb_syslibs` test checks the XCB extension headers and libraries together.
++An installation with only `libxcb1-dev` can find `XCB::XCB` and still fail
++`TEST_xcb_syslibs`. The Qt recipes allow native pkg-config discovery for these
++system dependencies. If the test fails, check the Qt build's
++`CMakeFiles/CMakeConfigureLog.yaml` and confirm that the extension development
++packages and `xkbcommon-x11` are visible to pkg-config.
++
++From a clean Yerbas checkout:
++
++```sh
++make -C depends -j2
+ ./autogen.sh
+-./configure --prefix="$PWD/depends/x86_64-pc-linux-gnu" \
+-  --with-gui=qt6 --with-qrencode --without-miniupnpc \
+-  --disable-bench --enable-wallet --enable-tests
++./configure --prefix="$PWD/depends/$(cd depends && ./config.guess)" --with-gui=qt6
+ make -j2
++```
++
++On an existing checkout, clean the application objects before switching Qt
++SDKs. The pinned depends SDK provides the Qt development libraries, `moc`,
++`uic`, `rcc` and Linguist tools. The system Qt option requires corresponding Qt
++6.8+ development packages and tools separately. See
++[Berkeley DB instructions](berkeley-db-local.md) for the independent BDB-only build.
++
++Depends also supplies OpenSSL 3.5.9 LTS. System builds need OpenSSL 3.5 or newer.
++With tests enabled, run the core and GUI test binaries after building:
++
++```sh
+ python3 ci/run-unit-tests.py src/test/test_yerbas --output test-results-gui-deps
+-QT_QPA_PLATFORM=offscreen src/qt/test/test_yerbas-qt
++QT_QPA_PLATFORM=minimal src/qt/test/test_yerbas-qt
++```
++
++## Linux runtime verification
++
++On the destination, run these checks against a copy of the executable:
++
++```sh
++readelf -d ./yerbas-qt | grep -E 'NEEDED|RPATH|RUNPATH'
++ldd ./yerbas-qt
++QT_QPA_PLATFORM=xcb ./yerbas-qt -version
+ ```
+ 
+-Do not reuse the old dependency prefix under Documents/Codex or objects compiled
+-against older Boost/Qt versions. If no Makefile exists, omit `make clean`.
+-Qt tool discovery uses Qt6Core's pkg-config `libexecdir` and `bindir` and rejects
+-non-Qt-6 moc/uic/rcc/lrelease. Configure no longer probes protobuf.
++The static Qt build should show no `libQt6*.so`, missing libraries, or build-host
++runtime paths. The version command initializes the XCB platform, so run it
++inside an X11 or XWayland session, or under `xvfb-run -a` for a smoke test.
++A normal launch should display the wallet.
++
++The raw ELF uses the host's compatible CPU, Linux loader, glibc, compiler
++runtime, X11 or XWayland display, fonts and keyboard data. It statically
++links X11/XCB, xkbcommon, fontconfig and their desktop library dependencies.
++The builder needs the static archives from its development packages. Depends
++builds the pinned xkbcommon archives because Debian ships shared xkbcommon in
++its development packages. The final link probe rejects other shared libraries.
++HTTPS features use the system CA certificates.
+ 
+-The dependency and full application rebuild remain manual. Syntax checks and
+-focused GUI tests do not establish full linking, GUI startup, wallet transaction
+-behavior, or cross-platform compatibility. Run the asset wallet checks in
+-[asset-viewer-updates.md](asset-viewer-updates.md) before using this build with
+-valuable wallets. Existing core test failures must remain visible.
++Mint 22.3 uses the Ubuntu 24.04 base. Static Qt does not lower the system ABI
++baseline. Check the actual Debian-built executable on the destination. For
++example, inspect its highest glibc symbol version with
++`readelf --version-info ./yerbas-qt | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1`.
++If a build requires a newer ABI than the destination provides, use a
++destination-compatible toolchain/sysroot or build against Ubuntu 24.04.
+ 
+-See [dependency-modernization.md](dependency-modernization.md) for pins,
+-compatibility exceptions, upstream sources and validation details.
++## Distributing static Qt builds
+ 
+-The core configure checks require OpenSSL 3.5 or newer. Depends supplies 3.5.9
+-LTS; system builds must provide matching supported headers and libraries.
++The depends prefix contains Qt license texts under `share/licenses`. Preserve
++the relevant license texts, copyright notices, and third-party attributions
++when distributing. Bake's executable archive alone does not satisfy those
++obligations. For LGPLv3 distribution, provide the required corresponding Qt
++source, including any changes, and the application object files or equivalent
++materials and instructions that let recipients relink and run the application
++with a modified Qt. Provide installation information where required and allow
++the reverse engineering needed to debug modifications. Alternatively, use a
++compatible GPL distribution or a commercial Qt license that covers the
++distribution. Review the licenses of the actual modules and third-party code
++included in the build, including the distribution packages that supply the
++static desktop archives. See [Qt licensing](https://www.qt.io/licensing/open-source-lgpl-obligations).
