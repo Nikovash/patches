@@ -1,0 +1,389 @@
+diff --git a/ci/build-native-qt.py b/ci/build-native-qt.py
+index 33a43635b2dd8d14bff248d62631d4f64801a6c5..8182c2176e1a52b2a70886a9c225a4158300cd7b 100644
+--- a/ci/build-native-qt.py
++++ b/ci/build-native-qt.py
+@@ -54,11 +54,16 @@ DESKTOP_MODULES = (
+ )
+ 
+ 
+-def linux_static_desktop_link(link, prefix, build, staging_prefix):
++def linux_static_desktop_link(link, prefix, build, staging_prefix, target_pc=None):
+     """Resolve the desktop archive closure and test it with the actual Qt probe."""
+     env = os.environ.copy()
+     env.pop('PKG_CONFIG_LIBDIR', None)
+     env['PKG_CONFIG_PATH'] = str(prefix / 'lib/pkgconfig')
++    if target_pc:
++        env['PKG_CONFIG_PATH'] = ''
++        env['PKG_CONFIG_LIBDIR'] = target_pc
++        env.pop('PKG_CONFIG_SYSROOT_DIR', None)
++    compiler = shlex.split(os.environ['CXX']) if target_pc else [link[0]]
+     libraries = shlex.split(subprocess.check_output(
+         ['pkg-config', '--static', '--libs', *DESKTOP_MODULES], text=True, env=env
+     ))
+@@ -79,7 +84,7 @@ def linux_static_desktop_link(link, prefix, build, staging_prefix):
+                 archives[name] = str(directory / archive)
+                 break
+         else:
+-            path = subprocess.check_output([link[0], f'-print-file-name={archive}'], text=True).strip()
++            path = subprocess.check_output([*compiler, f'-print-file-name={archive}'], text=True).strip()
+             if not Path(path).is_absolute() or not Path(path).is_file():
+                 raise ValueError(f'Missing static desktop archive: {archive}. Install its development package on the builder.')
+             archives[name] = os.path.realpath(path)
+@@ -104,7 +109,17 @@ def linux_static_desktop_link(link, prefix, build, staging_prefix):
+     return result
+ 
+ 
+-def check_linux_elf(path):
++def check_linux_elf(path, architecture=None):
++    if architecture:
++        expected = {'i686': (1, 3), 'aarch64': (2, 183)}[architecture]
++        with path.open('rb') as executable:
++            header = executable.read(20)
++        if (len(header) != 20 or header[:4] != b'\x7fELF' or header[5] != 1 or
++                (header[4], int.from_bytes(header[18:20], 'little')) != expected):
++            raise ValueError(f'{path}: expected a little-endian {architecture} ELF')
++        symbols = subprocess.check_output(['readelf', '-sW', path], text=True)
++        if not re.search(r'\bFUNC\s+\S+\s+\S+\s+\d+\s+\S*qt_static_plugin_QXcbIntegrationPlugin', symbols):
++            raise ValueError(f'{path}: static XCB platform plugin not found')
+     dynamic = subprocess.check_output(['readelf', '-dW', path], text=True)
+     needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', dynamic)
+     unexpected = [name for name in needed if not LINUX_SYSTEM_LIBRARIES.fullmatch(name)]
+@@ -112,7 +127,8 @@ def check_linux_elf(path):
+         raise ValueError(f'{path}: unexpected ELF runtime dependencies or search path: {unexpected}')
+ 
+ 
+-def static_metadata(prefix, cmake, jobs, host=None, staging_prefix=None, probe_dir=None):
++def static_metadata(prefix, cmake, jobs, host=None, staging_prefix=None, probe_dir=None,
++                    linux_host=None, target_pc=None, cmake_args=()):
+     """Resolve static plugins with Qt's CMake targets for our Autotools build."""
+     probe = probe_dir or prefix / 'static-link'
+     output_prefix = staging_prefix or prefix
+@@ -137,7 +153,7 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+                        f'-DCMAKE_MODULE_PATH={staging_prefix}/lib/cmake/Qt6',
+                        f'-DOPENSSL_ROOT_DIR={prefix}', '-DOPENSSL_USE_STATIC_LIBS=ON']
+     run(cmake, '-S', probe, '-B', build, '-G', 'Unix Makefiles',
+-        f'-DCMAKE_PREFIX_PATH={prefix}', '-DCMAKE_BUILD_TYPE=Release', *cross_args)
++        f'-DCMAKE_PREFIX_PATH={prefix}', '-DCMAKE_BUILD_TYPE=Release', *cross_args, *cmake_args)
+     run(cmake, '--build', build, '--parallel', jobs)
+     target = build / 'CMakeFiles/qt_link_probe.dir'
+     # MinGW Makefiles can emit cleanup, archive, and compiler commands on
+@@ -155,8 +171,8 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+                 if len(command) > 3 and command[1] == 'qc'}
+     link = [item for token in link for item in archives.get(token, [token])]
+     if staging_prefix:
+-        link = linux_static_desktop_link(link, prefix, build, staging_prefix)
+-        check_linux_elf(build / link[link.index('-o') + 1])
++        link = linux_static_desktop_link(link, prefix, build, staging_prefix, target_pc)
++        check_linux_elf(build / link[link.index('-o') + 1], linux_host)
+     output = link.index('-o')
+     # Preserve Qt-generated plugin initialization objects, but not probe main().
+     # Libtool moves shared libraries before static archives. Keep those
+@@ -206,7 +222,7 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+         flags = relocate(flags)
+         cflags = relocate(cflags)
+     pc_prefix = '${pcfiledir}/../..' if staging_prefix else str(prefix)
+-    tools_prefix = '${prefix}/native' if host else '${prefix}'
++    tools_prefix = '${prefix}/native' if host or linux_host else '${prefix}'
+     for module in ('Core', 'Gui', 'Widgets', 'Network', 'Core5Compat', 'Test'):
+         # Put the complete link graph on Core once; duplicate plugin objects
+         # across module flags would define initialization symbols twice.
+@@ -228,9 +244,13 @@ def main():
+     parser.add_argument('--metadata-only', action='store_true', help='Resolve an already built static Qt prefix')
+     parser.add_argument('--staging-prefix', type=Path, help='Emit relocatable metadata in a depends staging prefix')
+     parser.add_argument('--probe-dir', type=Path, help='Build directory for the static plugin link probe')
++    parser.add_argument('--linux-host', choices=['i686', 'aarch64'],
++                        help='Verify a cross-compiled ELF and select native Qt tools')
++    parser.add_argument('--target-pkg-config-libdir', help='Target pkg-config search directories')
++    parser.add_argument('--cmake-arg', action='append', default=[], help='Argument for the link probe')
+     args = parser.parse_args()
+     if args.check_linux_elf:
+-        check_linux_elf(args.check_linux_elf)
++        check_linux_elf(args.check_linux_elf, args.linux_host)
+         return
+     if not args.prefix or not args.cmake:
+         parser.error('--prefix and --cmake are required for Qt builds or metadata generation')
+@@ -241,11 +261,18 @@ def main():
+         parser.error('--windows-host requires --metadata-only')
+     if (args.staging_prefix or args.probe_dir) and not (args.static_linux and args.metadata_only):
+         parser.error('--staging-prefix and --probe-dir require --static-linux --metadata-only')
++    if (args.linux_host or args.target_pkg_config_libdir or args.cmake_arg) and not (
++        args.static_linux and args.metadata_only and args.staging_prefix
++        and args.linux_host and args.target_pkg_config_libdir and args.cmake_arg
++        and 'CC' in os.environ and 'CXX' in os.environ
++    ):
++        parser.error('Linux cross metadata requires staged Qt, target pkg-config paths, CMake arguments and CC/CXX')
+     if args.metadata_only:
+         if not args.static_linux and not args.windows_host:
+             parser.error('--metadata-only requires --static-linux or --windows-host')
+         static_metadata(prefix, args.cmake, args.jobs, args.windows_host,
+-                        args.staging_prefix, args.probe_dir)
++                        args.staging_prefix, args.probe_dir, args.linux_host,
++                        args.target_pkg_config_libdir, args.cmake_arg)
+         return
+     sources = ROOT / 'depends/sources'
+     work = ROOT / ('qt-native-static-work' if args.static_linux else 'qt-native-work')
+diff --git a/depends/Makefile b/depends/Makefile
+index ca13115402950c059f51d46b40f69e7e0e0f53c9..5bf55e683cf91204e77ef94ce60bdbfc398d693a 100644
+--- a/depends/Makefile
++++ b/depends/Makefile
+@@ -117,11 +117,20 @@ ifeq ($(NO_QT),)
+ ifeq ($(build_os)_$(host_os)_$(host_arch),linux_mingw32_x86_64)
+ qt_packages_ = $(qt_packages) qt qt5compat
+ qt_native_packages = native_qt native_qttools
+-else ifeq ($(build_os)_$(host_os)_$(build_arch),linux_linux_$(host_arch))
++else ifeq ($(build_os)_$(host_os),linux_linux)
++ifeq ($(host_arch),$(build_arch))
+ qt_packages_ = $(qt_packages) xkbcommon qt qt5compat qttools
+ qt_native_packages = native_meson native_ninja native_bison
++else ifneq ($(filter $(host_arch),i686 aarch64),)
++linux_qt_cross = 1
++linux_qt_host_tools = native_qt native_qttools
++qt_packages_ = $(qt_packages) xkbcommon qt qt5compat
++qt_native_packages = native_meson native_ninja native_bison $(linux_qt_host_tools)
+ else
+-$(error GUI dependencies support native Linux/macOS and Linux to x86_64-w64-mingw32. Use NO_QT=1 for other targets)
++$(error Unsupported Linux GUI cross target $(host). Use NO_QT=1 for other targets)
++endif
++else
++$(error GUI dependencies support native Linux/macOS and supported Linux/MinGW cross targets. Use NO_QT=1 for other targets)
+ endif
+ endif
+ endif
+@@ -141,6 +150,25 @@ meta_depends = Makefile funcs.mk builders/default.mk hosts/default.mk hosts/$(ho
+ 
+ $(host_arch)_$(host_os)_native_toolchain?=$($(host_os)_native_toolchain)
+ 
++# Debian multiarch installs target desktop development files alongside the
++# build machine's files. Use only the target pkg-config directories for cross Qt.
++linux_qt_pkg_env = env -u PKG_CONFIG_LIBDIR PKG_CONFIG_PATH="$(host_prefix)/lib/pkgconfig"
++ifeq ($(linux_qt_cross),1)
++linux_qt_multiarch := $(shell $(host_CC) -print-multiarch)
++linux_qt_build_multiarch := $(shell $(build_CC) -print-multiarch)
++ifeq ($(linux_qt_multiarch),)
++$(error Cannot determine the Qt target library directory using $(host_CC))
++endif
++linux_qt_target_pc = $(host_prefix)/lib/pkgconfig:/usr/lib/$(linux_qt_multiarch)/pkgconfig:/usr/share/pkgconfig
++linux_qt_pkg_env = env -u PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$(linux_qt_target_pc)"
++linux_qt_cmake_cross = -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=$(host_arch) \
++  -DQT_HOST_PATH="$(build_prefix)" -DCMAKE_PREFIX_PATH="$(host_prefix)" \
++  -DPKG_CONFIG_USE_CMAKE_PREFIX_PATH=OFF \
++  -DCMAKE_LIBRARY_PATH="/usr/lib/$(linux_qt_multiarch)" \
++  -DCMAKE_INCLUDE_PATH="/usr/include/$(linux_qt_multiarch)" \
++  -DCMAKE_IGNORE_PATH="/usr/lib/$(linux_qt_build_multiarch);/lib/$(linux_qt_build_multiarch);/usr/include/$(linux_qt_build_multiarch);/usr/local/lib;/usr/local/include"
++endif
++
+ ifeq ($(host_os),linux)
+ qt5compat_recipe_inputs = ../ci/build-native-qt.py
+ endif
+@@ -170,6 +198,7 @@ $(host_prefix)/share/config.site : config.site.in $(host_prefix)/.stamp_$(final_
+             -e 's|@STRIP@|$(toolchain_path)$(host_STRIP)|' \
+             -e 's|@build_os@|$(build_os)|' \
+             -e 's|@host_os@|$(host_os)|' \
++            -e 's|@linux_qt_cross@|$(linux_qt_cross)|' \
+             -e 's|@CFLAGS@|$(strip $(host_CFLAGS) $(host_$(release_type)_CFLAGS))|' \
+             -e 's|@CXXFLAGS@|$(strip $(host_CXXFLAGS) $(host_$(release_type)_CXXFLAGS))|' \
+             -e 's|@CPPFLAGS@|$(strip $(host_CPPFLAGS) $(host_$(release_type)_CPPFLAGS))|' \
+diff --git a/depends/config.site.in b/depends/config.site.in
+index 98edbf094562614efe77acc3fcd3ef95d4c6a672..907898d55c3a5a0eb514eb1490a53431419411f4 100644
+--- a/depends/config.site.in
++++ b/depends/config.site.in
+@@ -14,7 +14,7 @@ if test "x@use_system_qt@" != x1; then
+   if test -z "$with_qt_translationdir"; then
+     with_qt_translationdir=$depends_prefix/translations
+   fi
+-  if test "x@host_os@" = xmingw32; then
++  if test "x@host_os@" = xmingw32 || test "x@linux_qt_cross@" = x1; then
+     if test -z "$with_qt_bindir"; then
+       with_qt_bindir=$depends_prefix/native/bin
+     fi
+diff --git a/depends/hosts/linux.mk b/depends/hosts/linux.mk
+index 602206d6342195393ebe53609b321241c04850bb..47d422c0913f9f6bb0ac4800dc15e9ee20e78aec 100644
+--- a/depends/hosts/linux.mk
++++ b/depends/hosts/linux.mk
+@@ -10,12 +10,24 @@ linux_debug_CXXFLAGS=$(linux_debug_CFLAGS)
+ linux_debug_CPPFLAGS=-D_GLIBCXX_DEBUG -D_GLIBCXX_DEBUG_PEDANTIC
+ 
+ ifeq (86,$(findstring 86,$(build_arch)))
++# Bake uses i686-pc-linux-gnu, while Debian names its dedicated tools
++# i686-linux-gnu. Keep support for builders with the multilib compiler.
+ i686_linux_CC=gcc -m32
+ i686_linux_CXX=g++ -m32
+ i686_linux_AR=ar
+ i686_linux_RANLIB=ranlib
+ i686_linux_NM=nm
+ i686_linux_STRIP=strip
++ifneq ($(host_arch),$(build_arch))
++ifneq ($(shell command -v i686-linux-gnu-g++ 2>/dev/null),)
++i686_linux_CC=i686-linux-gnu-gcc
++i686_linux_CXX=i686-linux-gnu-g++
++i686_linux_AR=i686-linux-gnu-ar
++i686_linux_RANLIB=i686-linux-gnu-ranlib
++i686_linux_NM=i686-linux-gnu-nm
++i686_linux_STRIP=i686-linux-gnu-strip
++endif
++endif
+ 
+ x86_64_linux_CC=gcc -m64
+ x86_64_linux_CXX=g++ -m64
+diff --git a/depends/packages/qt.mk b/depends/packages/qt.mk
+index b69387e3f0ca2259fcdd3540772e99403e5e04d3..87593fb43f86806f49c965ed2c621379ee2d8762 100644
+--- a/depends/packages/qt.mk
++++ b/depends/packages/qt.mk
+@@ -6,7 +6,7 @@ $(package)_file_name=qtbase-everywhere-src-$($(package)_version).tar.xz
+ $(package)_sha256_hash=a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307
+ $(package)_dependencies=native_cmake
+ $(package)_mingw32_dependencies=native_qt native_qttools
+-$(package)_linux_dependencies=openssl xkbcommon
++$(package)_linux_dependencies=openssl xkbcommon $(linux_qt_host_tools)
+ 
+ $(package)_config_opts_mingw32 = \
+     -DCMAKE_SYSTEM_NAME=Windows \
+@@ -20,8 +20,8 @@ $(package)_config_opts_mingw32 = \
+     -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+     -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+ 
+-# Qt's FindXCB uses the host pkg-config paths for extension headers.
+-$(package)_config_opts_linux = \
++# Qt uses target pkg-config paths to find the XCB extension headers.
++$(package)_config_opts_linux = $(linux_qt_cmake_cross) \
+     -DFEATURE_xcb=ON \
+     -DFEATURE_glib=OFF \
+     -DFEATURE_vulkan=OFF \
+@@ -31,7 +31,7 @@ $(package)_config_opts_linux = \
+     -DOPENSSL_USE_STATIC_LIBS=ON
+ 
+ define $(package)_config_cmds
+-  $(if $(filter linux,$(host_os)),env -u PKG_CONFIG_LIBDIR PKG_CONFIG_PATH="$(host_prefix)/lib/pkgconfig") \
++  $(if $(filter linux,$(host_os)),$(linux_qt_pkg_env)) \
+   $(build_prefix)/bin/cmake -S . -B build -G "Unix Makefiles" \
+     -DCMAKE_INSTALL_PREFIX=$(host_prefix) \
+     -DCMAKE_BUILD_TYPE=Release \
+diff --git a/depends/packages/qt5compat.mk b/depends/packages/qt5compat.mk
+index 39cf183b8b0011082d358fb51d8901ec58c926ac..5bfd8c18e3e9294e11db24a23bae3015ab34dd9c 100644
+--- a/depends/packages/qt5compat.mk
++++ b/depends/packages/qt5compat.mk
+@@ -18,20 +18,23 @@ $(package)_config_opts_mingw32 = \
+     -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+     -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+ 
+-$(package)_config_opts_linux = \
++$(package)_config_opts_linux = $(linux_qt_cmake_cross) \
+     -DOPENSSL_ROOT_DIR="$(host_prefix)" \
+     -DOPENSSL_USE_STATIC_LIBS=ON
+ 
+ ifeq ($(host_os),linux)
+ $(package)_stage_metadata = && \
++  $(linux_qt_pkg_env) CC="$(host_CC)" CXX="$(host_CXX)" \
+   python3 $(BASEDIR)/../ci/build-native-qt.py --static-linux --metadata-only \
+     --prefix "$(host_prefix)" --staging-prefix "$($(package)_staging_prefix_dir)" \
+     --probe-dir "$($(package)_build_dir)/static-link" \
+-    --cmake "$(build_prefix)/bin/cmake"
++    --cmake "$(build_prefix)/bin/cmake" \
++    $(if $(linux_qt_cross),--linux-host "$(host_arch)" --target-pkg-config-libdir "$(linux_qt_target_pc)" \
++      $(foreach option,$(linux_qt_cmake_cross),--cmake-arg=$(option)))
+ endif
+ 
+ define $(package)_config_cmds
+-  $(if $(filter linux,$(host_os)),env -u PKG_CONFIG_LIBDIR PKG_CONFIG_PATH="$(host_prefix)/lib/pkgconfig") \
++  $(if $(filter linux,$(host_os)),$(linux_qt_pkg_env)) \
+   $(build_prefix)/bin/cmake -S . -B build -G "Unix Makefiles" \
+     -DCMAKE_INSTALL_PREFIX=$(host_prefix) \
+     -DCMAKE_BUILD_TYPE=Release \
+diff --git a/depends/packages/xkbcommon.mk b/depends/packages/xkbcommon.mk
+index 8f5916bde6aae131728206ab7a1fa1ab23c87e37..8ff32582c9a74ebf032fcc0ba569dcce26677a7c 100644
+--- a/depends/packages/xkbcommon.mk
++++ b/depends/packages/xkbcommon.mk
+@@ -5,9 +5,25 @@ $(package)_file_name=libxkbcommon-$($(package)_version).tar.xz
+ $(package)_sha256_hash=65782f0a10a4b455af9c6baab7040e2f537520caa2ec2092805cdfd36863b247
+ $(package)_dependencies=native_meson native_ninja native_bison
+ 
++ifeq ($(linux_qt_cross),1)
++# Bison and Ninja run on the build machine. The Meson host machine is the
++# machine that will run the resulting library.
++$(package)_write_cross_file = printf '%s\n' \
++    '[binaries]' "c = [$(foreach arg,$(host_CC),'$(arg)',)]" \
++    "ar = '$(host_AR)'" "strip = '$(host_STRIP)'" "pkg-config = 'pkg-config'" \
++    '[host_machine]' "system = 'linux'" \
++    "cpu_family = '$(if $(filter i686,$(host_arch)),x86,$(host_arch))'" \
++    "cpu = '$(host_arch)'" "endian = 'little'" \
++    '[properties]' 'needs_exe_wrapper = true' \
++    "pkg_config_libdir = [$(foreach dir,$(subst :, ,$(linux_qt_target_pc)),'$(dir)',)]" \
++    > yerbas-cross.ini &&
++$(package)_cross_option = --cross-file yerbas-cross.ini
++endif
++
+ define $(package)_config_cmds
+-  env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH CC="$(host_CC)" \
+-    $(build_prefix)/bin/meson setup build --prefix="$(host_prefix)" --libdir=lib --buildtype=release \
++  $($(package)_write_cross_file) \
++  $(linux_qt_pkg_env) PATH="$(build_prefix)/bin:$(PATH)" CC="$(host_CC)" \
++    $(build_prefix)/bin/meson setup build $($(package)_cross_option) --prefix="$(host_prefix)" --libdir=lib --buildtype=release \
+       --default-library=static -Db_staticpic=true -Denable-x11=true \
+       -Denable-tools=false -Denable-wayland=false -Denable-xkbregistry=false \
+       -Denable-bash-completion=false -Dxkb-config-root=/usr/share/X11/xkb \
+diff --git a/doc/local-gui-build.md b/doc/local-gui-build.md
+index 4cd7411f7cc28037d693cc32f64a183e84db2e16..0f0c253837910c5d255089de4157e931bec83059 100644
+--- a/doc/local-gui-build.md
++++ b/doc/local-gui-build.md
+@@ -69,6 +69,61 @@ python3 ci/run-unit-tests.py src/test/test_yerbas --output test-results-gui-deps
+ QT_QPA_PLATFORM=minimal src/qt/test/test_yerbas-qt
+ ```
+ 
++## Cross-compiling from Debian 13 x86-64
++
++Bake's `i686-pc-linux-gnu` and `aarch64-linux-gnu` targets use the same
++static Qt GUI build. Depends builds and runs matching native Qt tools and
++uses the target compiler for Qt, xkbcommon, and the link probe. The Debian
++target architecture names are `i386` and `arm64`.
++
++Install the appropriate compiler and libc development sysroot. For i686,
++`g++-i686-linux-gnu libc6-dev-i386-cross` works alongside the AArch64 tools.
++Yerbas also supports `g++-multilib` with `gcc -m32` and `g++ -m32` for
++i686. For AArch64 use `g++-aarch64-linux-gnu libc6-dev-arm64-cross`.
++
++Enable Debian multiarch and install the target desktop development packages
++and their static archives. Run the following for each architecture you build:
++
++```sh
++arch=i386                         # Use arm64 for AArch64.
++set --
++sudo dpkg --add-architecture "$arch"
++sudo apt-get update
++for pkg in libfontconfig-dev libbrotli-dev libx11-xcb-dev libxcb1-dev \
++  libxcb-cursor-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev \
++  libxcb-util-dev libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev \
++  libxcb-shape0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xfixes0-dev \
++  libxcb-xkb-dev libxau-dev libxdmcp-dev; do
++  set -- "$@" "$pkg:$arch"
++done
++sudo apt-get install "$@"
++```
++
++Select the target in Bake or run the usual build steps with its host triplet:
++
++```sh
++host=i686-pc-linux-gnu            # Or aarch64-linux-gnu.
++make -C depends -j2 HOST="$host"
++./autogen.sh
++./configure --prefix="$PWD/depends/$host" --with-gui=qt6
++make -j2
++```
++
++Check the unstripped program on the build host. Use `aarch64` for the ARM64
++build. The checker verifies the ELF architecture, static XCB plugin symbol and
++remaining shared-library requirements without executing the cross binary:
++
++```sh
++python3 ci/build-native-qt.py --check-linux-elf src/qt/yerbas-qt --linux-host i686
++readelf -dW src/qt/yerbas-qt
++readelf --version-info src/qt/yerbas-qt
++```
++
++i686 requires a 32-bit kernel or 32-bit compatibility support on x86-64 and
++a compatible 32-bit Linux loader and runtime. AArch64 requires the AArch64
++loader and runtime. Check the glibc and compiler-runtime symbol versions
++against the destination when targeting older distributions.
++
+ ## Linux runtime verification
+ 
+ On the destination, run these checks against a copy of the executable:
