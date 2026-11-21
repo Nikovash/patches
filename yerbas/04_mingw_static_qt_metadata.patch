@@ -1,0 +1,140 @@
+diff --git a/.github/workflows/build.yaml b/.github/workflows/build.yaml
+index d51278fd15a1380c25cded4fce9983edd34884fd..53dba7e211ab8de1d2280f49b20fbf037b66e73e 100644
+--- a/.github/workflows/build.yaml
++++ b/.github/workflows/build.yaml
+@@ -171,13 +171,6 @@ jobs:
+           pkg-config --atleast-version=6.8 Qt6Core Qt6Gui Qt6Widgets Qt6Network Qt6Core5Compat Qt6Test
+           echo "QT_NATIVE_PREFIX=$PWD/qt-native" >> "$GITHUB_ENV"
+ 
+-      - name: Resolve static Windows Qt linkage
+-        if: matrix.platform.id == 'win64'
+-        run: |
+-          python3 ci/build-native-qt.py --prefix "$PWD/depends/$HOST_TRIPLE" \
+-            --metadata-only --windows-host "$HOST_TRIPLE" \
+-            --cmake "$PWD/depends/$HOST_TRIPLE/native/bin/cmake" --jobs "$BUILD_JOBS"
+-
+       - name: Configure with wallet and tests enabled
+         run: |
+           set -euo pipefail
+diff --git a/ci/build-native-qt.py b/ci/build-native-qt.py
+index 8182c2176e1a52b2a70886a9c225a4158300cd7b..09dc37b3727ba276b71838bd72db0af92e86cb18 100644
+--- a/ci/build-native-qt.py
++++ b/ci/build-native-qt.py
+@@ -150,8 +150,9 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+                       f'-DCMAKE_C_COMPILER={host}-gcc', f'-DQT_HOST_PATH={prefix}/native']
+     if staging_prefix:
+         cross_args += [f'-DQt6Core5Compat_DIR={staging_prefix}/lib/cmake/Qt6Core5Compat',
+-                       f'-DCMAKE_MODULE_PATH={staging_prefix}/lib/cmake/Qt6',
+-                       f'-DOPENSSL_ROOT_DIR={prefix}', '-DOPENSSL_USE_STATIC_LIBS=ON']
++                       f'-DCMAKE_MODULE_PATH={staging_prefix}/lib/cmake/Qt6']
++        if not host:
++            cross_args += [f'-DOPENSSL_ROOT_DIR={prefix}', '-DOPENSSL_USE_STATIC_LIBS=ON']
+     run(cmake, '-S', probe, '-B', build, '-G', 'Unix Makefiles',
+         f'-DCMAKE_PREFIX_PATH={prefix}', '-DCMAKE_BUILD_TYPE=Release', *cross_args, *cmake_args)
+     run(cmake, '--build', build, '--parallel', jobs)
+@@ -170,7 +171,7 @@ qt_import_plugins(qt_link_probe INCLUDE Qt6::PLATFORM_PLUGIN Qt6::QMinimalIntegr
+     archives = {command[2]: command[3:] for command in commands
+                 if len(command) > 3 and command[1] == 'qc'}
+     link = [item for token in link for item in archives.get(token, [token])]
+-    if staging_prefix:
++    if staging_prefix and not host:
+         link = linux_static_desktop_link(link, prefix, build, staging_prefix, target_pc)
+         check_linux_elf(build / link[link.index('-o') + 1], linux_host)
+     output = link.index('-o')
+@@ -259,8 +260,10 @@ def main():
+         parser.error('--static-linux requires Linux')
+     if args.windows_host and not args.metadata_only:
+         parser.error('--windows-host requires --metadata-only')
+-    if (args.staging_prefix or args.probe_dir) and not (args.static_linux and args.metadata_only):
+-        parser.error('--staging-prefix and --probe-dir require --static-linux --metadata-only')
++    if (args.staging_prefix or args.probe_dir) and not (
++        args.metadata_only and (args.static_linux or args.windows_host)
++    ):
++        parser.error('--staging-prefix and --probe-dir require static Qt metadata generation')
+     if (args.linux_host or args.target_pkg_config_libdir or args.cmake_arg) and not (
+         args.static_linux and args.metadata_only and args.staging_prefix
+         and args.linux_host and args.target_pkg_config_libdir and args.cmake_arg
+diff --git a/ci/tests/test_static_qt_metadata.py b/ci/tests/test_static_qt_metadata.py
+index 23a1d72264f937596c45426fb1b40e29e4872469..91bebc1272aea3c59ef70f8cb11ff171b293fd56 100644
+--- a/ci/tests/test_static_qt_metadata.py
++++ b/ci/tests/test_static_qt_metadata.py
+@@ -72,6 +72,34 @@ class StaticMetadataTests(unittest.TestCase):
+             self.assertEqual((staging / 'lib/yerbas-qt/2-plugin.cpp.o').read_bytes(),
+                              b'plugin object')
+ 
++    def test_windows_staging_exports_relocatable_metadata(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            prefix = root / 'depends'
++            staging = root / 'stage'
++            probe = root / 'probe'
++            target = probe / 'build/CMakeFiles/qt_link_probe.dir'
++            target.mkdir(parents=True)
++            (target / 'plugin.cpp.obj').write_bytes(b'Windows plugin object')
++            (target / 'flags.make').write_text(
++                f'CXX_DEFINES = -DQT_STATIC\nCXX_INCLUDES = -I{prefix}/include/QtCore\n')
++            (target / 'link.txt').write_text(
++                'x86_64-w64-mingw32-g++ CMakeFiles/qt_link_probe.dir/main.cpp.obj '
++                'CMakeFiles/qt_link_probe.dir/plugin.cpp.obj -o qt_link_probe.exe '
++                f'{staging}/lib/libQt6Core5Compat.a {prefix}/lib/libQt6Core.a -lkernel32\n')
++            with (patch.object(BUILD, 'run') as cmake,
++                  patch.object(BUILD, 'linux_static_desktop_link') as linux_link):
++                BUILD.static_metadata(prefix, 'cmake', 2, 'x86_64-w64-mingw32', staging, probe)
++            linux_link.assert_not_called()
++            self.assertIn(f'-DQt6Core5Compat_DIR={staging}/lib/cmake/Qt6Core5Compat',
++                          cmake.call_args_list[0].args)
++            pc = (staging / 'lib/pkgconfig/Qt6Core.pc').read_text()
++            self.assertNotIn(str(root), pc)
++            self.assertIn('libexecdir=${prefix}/native/libexec', pc)
++            self.assertIn('${prefix}/lib/libQt6Core5Compat.a', pc)
++            self.assertIn('${prefix}/lib/yerbas-qt/2-plugin.cpp.obj', pc)
++            self.assertTrue((staging / 'lib/yerbas-qt/2-plugin.cpp.obj').is_file())
++
+     def test_missing_response_file_fails_early(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             with self.assertRaises(FileNotFoundError):
+diff --git a/depends/Makefile b/depends/Makefile
+index cfecf1bacbcf55bdb40878f33edee87dcc328c76..8d006210989acc261088f99147360664280cf90f 100644
+--- a/depends/Makefile
++++ b/depends/Makefile
+@@ -183,7 +183,7 @@ linux_qt_cmake_cross = -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=$(host
+ $(host_arch)_$(host_os)_id_string += $(LINUX_QT_TARGET_PKG_CONFIG_LIBDIR) $(LINUX_QT_TARGET_LIBRARY_PATH) $(LINUX_QT_TARGET_INCLUDE_PATH)
+ endif
+ 
+-ifeq ($(host_os),linux)
++ifneq ($(filter linux mingw32,$(host_os)),)
+ qt5compat_recipe_inputs = ../ci/build-native-qt.py
+ endif
+ 
+diff --git a/depends/packages/qt5compat.mk b/depends/packages/qt5compat.mk
+index 5bfd8c18e3e9294e11db24a23bae3015ab34dd9c..14df322d654fdcca4853b68ebb39a4d005933f62 100644
+--- a/depends/packages/qt5compat.mk
++++ b/depends/packages/qt5compat.mk
+@@ -31,6 +31,12 @@ $(package)_stage_metadata = && \
+     --cmake "$(build_prefix)/bin/cmake" \
+     $(if $(linux_qt_cross),--linux-host "$(host_arch)" --target-pkg-config-libdir "$(linux_qt_target_pc)" \
+       $(foreach option,$(linux_qt_cmake_cross),--cmake-arg=$(option)))
++else ifeq ($(host_os),mingw32)
++$(package)_stage_metadata = && \
++  python3 $(BASEDIR)/../ci/build-native-qt.py --metadata-only --windows-host "$(host)" \
++    --prefix "$(host_prefix)" --staging-prefix "$($(package)_staging_prefix_dir)" \
++    --probe-dir "$($(package)_build_dir)/static-link" \
++    --cmake "$(build_prefix)/bin/cmake"
+ endif
+ 
+ define $(package)_config_cmds
+diff --git a/doc/ci-qt-artifacts.md b/doc/ci-qt-artifacts.md
+index 8c186e01da8546fba2174d13214929b5bf18e507..8ff409095642aaba7eda46343e3e8ce2f9d283cf 100644
+--- a/doc/ci-qt-artifacts.md
++++ b/doc/ci-qt-artifacts.md
+@@ -44,8 +44,8 @@ The static Linux builds use the default depends Qt SDK. Its Core5Compat recipe
+ uses Qt's CMake targets to resolve libraries and static plugin initialization
+ objects and emits pkg-config metadata for Autotools. macOS uses
+ `ci/build-native-qt.py` to build the shared Qt SDK and sets `QT_NATIVE_PREFIX`
+-for configure. Windows uses the same script to resolve static link metadata
+-with `--metadata-only --windows-host x86_64-w64-mingw32`. Qt source versions and
++for configure. Windows depends generates static link metadata while staging Core5Compat.
++Autotools reads it from the generated depends prefix. Qt source versions and
+ archive checksums are pinned in `depends/packages`.
+ 
+ Native test artifacts are tar archives to retain executable modes and library
